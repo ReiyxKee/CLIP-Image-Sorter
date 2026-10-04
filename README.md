@@ -69,3 +69,7 @@ Useful flags: `--skip-labeling`, `--epochs`, `--unfreeze 0` (classifier only, fa
 - [Falconsai/nsfw_image_detection](https://huggingface.co/Falconsai/nsfw_image_detection)
 
 R18 detection is a first pass, not moderation.
+
+## License
+
+[Apache-2.0](LICENSE). Third-party packages and models keep their own licenses; they are downloaded at runtime, not bundled. Danbooru data is fetched live and subject to Danbooru's terms.

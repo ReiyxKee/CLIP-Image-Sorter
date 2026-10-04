@@ -1,0 +1,8 @@
+CLIP Image Sorter
+Copyright 2026 Reiyx
+
+This project downloads and uses, but does not include:
+- google/siglip2-so400m-patch14-384 (Apache-2.0)
+- SmilingWolf/wd-eva02-large-tagger-v3 (Apache-2.0)
+- Falconsai/nsfw_image_detection (Apache-2.0)
+- PyTorch / torchvision (BSD-3-Clause), transformers / timm / sentencepiece / huggingface_hub (Apache-2.0), Pillow (MIT-CMU), pillow-heif (BSD-3-Clause)
