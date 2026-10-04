@@ -837,9 +837,14 @@ def main():
     if gallery:
         log(f"Reference gallery: {len(gallery.labels)} pictures")
     trained = None
-    if args.trained_threshold >= 0:
+    if args.trained_threshold >= 0 and not all((TRAINED_DIR / f).exists() for f in ("config.json", "head.safetensors", "labels.json")):
+        log(f"No trained model in {TRAINED_DIR}, skipping it. Run clip_sorter_train.py first.")
+    elif args.trained_threshold >= 0:
         log(f"Loading trained model from {TRAINED_DIR}...")
-        trained = TrainedModel(TRAINED_DIR, device)
+        try:
+            trained = TrainedModel(TRAINED_DIR, device)
+        except Exception as e:
+            log(f"Trained model failed to load, skipping it: {e}")
     models = (sorter, class_embs, nsfw, tagger, fallback, expander, gallery, trained)
     log("All models ready.")
 
