@@ -42,12 +42,12 @@ Runs in chunks and resumes where it stopped (`.sorted_sources.txt` in the output
 
 Tried in order until one is confident:
 
-1. WD Tagger (SmilingWolf/wd-eva02-large-tagger-v3)
-2. Reference gallery of already-known pictures
-3. SigLIP2 name match against top Danbooru characters
-4. Series-guided Danbooru search by hair/eye color
-5. Danbooru reference pictures for the top candidates
-6. Your trained model (see below)
+1. Your trained model (see below) runs alongside the steps below. When it is confident it wins; if the others disagree on character or series, the image is logged in `models/suspicious.json`
+2. WD Tagger (SmilingWolf/wd-eva02-large-tagger-v3)
+3. Reference gallery of already-known pictures
+4. SigLIP2 name match against top Danbooru characters
+5. Series-guided Danbooru search by hair/eye color
+6. Danbooru reference pictures for the top candidates
 7. Series folder only, or `Anime_Handdrawn` root
 
 Series names come from Danbooru and are cached in `./models`.
@@ -58,7 +58,24 @@ Series names come from Danbooru and are cached in `./models`.
 python clip_sorter_train.py --target-path ./pics_sorted
 ```
 
-Shows each anime image without a character, asks for character and series (with typo suggestions), moves it, then fine-tunes a SigLIP2 copy into `./models/finetuned`. `clip_sorter.py` uses it as the last fallback.
+Menu: `1` sort unclassed images, `2` fix wrong category (corrections file), `3` resolve suspicious, `4` train only (or `--task 1-4`). Training follows.
+
+Opens a labeling window for each anime image without a character: fill in character and series (click a suggestion to fix typos, `+ Character` for group images), Save (Enter), Skip (Esc) or Back (Ctrl+Z). It moves the image, then fine-tunes a SigLIP2 copy into `./models/finetuned`. `clip_sorter.py` checks it first.
+
+For images with several characters, enter them comma separated (`alsace, taihou`) and give each a series. They are filed like the sorter does (same series → series folder, mixed → `Anime_Handdrawn` root) and remembered in `.multi_labels.json` for training.
+
+Wrongly sorted characters can be listed in a corrections file (`--corrections fixes.txt`):
+
+```
+# review every image in this folder
+Azur Lane/Vanguard
+# move the whole folder
+Unknown Title/Kirito -> Sword Art Online/Kirito
+```
+
+Corrections also fix the reference gallery, so wrong pictures stop spreading.
+
+Ctrl+C during training stops early and still saves what was learned.
 
 Useful flags: `--skip-labeling`, `--epochs`, `--unfreeze 0` (classifier only, fast).
 

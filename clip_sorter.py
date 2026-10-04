@@ -95,8 +95,9 @@ EXPAND_LIMIT = 100
 EXPAND_THRESHOLD = 0.7
 APPEARANCE_THRESHOLD = 0.35
 GALLERY_THRESHOLD = 0.85
-TRAINED_THRESHOLD = 0.8
+TRAINED_THRESHOLD = 0.9
 TRAINED_DIR = Path(os.environ["HF_HOME"]) / "finetuned"
+SUS_FILE = Path(os.environ["HF_HOME"]) / "suspicious.json"
 REF_SHORTLIST = 5
 REF_IMAGES = 5
 COLORS = ("aqua", "black", "blonde", "blue", "brown", "green", "grey", "orange", "pink", "purple", "red", "silver", "white", "yellow")
@@ -600,9 +601,34 @@ class Gallery:
             if images:
                 self.add(self.sorter.embed_pil(images), [tagger.label(tag)] * len(images))
 
+    def relabel(self, old, new):
+        old = (old[0].lower(), old[1].lower())
+        hits = [(l[0].lower(), l[1].lower()) == old for l in self.labels]
+        if new:
+            self.labels = [new if h else l for l, h in zip(self.labels, hits)]
+        elif any(hits):
+            keep = [not h for h in hits]
+            self.embs = self.embs[torch.tensor(keep)] if any(keep) else None
+            self.labels = [l for l, k in zip(self.labels, keep) if k]
+        return sum(hits)
+
     def save(self):
         self.cache_file.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"model": self.model_id, "embs": self.embs, "labels": [list(l) for l in self.labels], "fetched": sorted(self.fetched)}, self.cache_file)
+
+
+def load_sus():
+    return json.loads(SUS_FILE.read_text(encoding="utf-8")) if SUS_FILE.exists() else []
+
+
+def save_sus(entries):
+    SUS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SUS_FILE.write_text(json.dumps(entries, indent=1, ensure_ascii=False), encoding="utf-8")
+
+
+def conflicts(trained, other):
+    titles = {t.lower() for t in (trained[0], other[0]) if t and t.lower() != UNKNOWN_TITLE.lower()}
+    return bool(other[1] and other[1] != trained[1]) or len(titles) > 1
 
 
 def labeled_images(root):
@@ -671,8 +697,8 @@ def transfer_unique(src, dest_dir, mode, stem):
     return dest
 
 
-def resolve_unknown(unknown, paths, embs, appearance, characters, sources, models, args):
-    sorter, _, _, tagger, fallback, expander, gallery, trained = models
+def resolve_unknown(unknown, embs, appearance, characters, sources, models, args, confident):
+    sorter, _, _, tagger, fallback, expander, gallery, _ = models
 
     def accept(indices, matches, name):
         for i, m in zip(indices, matches):
@@ -692,6 +718,7 @@ def resolve_unknown(unknown, paths, embs, appearance, characters, sources, model
             shortlist[i] = [pool_tags[j] for j in row]
         unknown = accept(unknown, [(tagger.label(pool_tags[j]), c) if c >= args.fallback_threshold else None for c, j in zip(conf.tolist(), idx.tolist())], "name")
 
+    unknown = [i for i in unknown if i not in confident]
     if expander and unknown:
         found = expander.resolve(embs[unknown], [appearance[i] for i in unknown], args.fallback_threshold, args.expand_threshold, tagger)
         for i, (_, series, top) in zip(unknown, found):
@@ -703,10 +730,6 @@ def resolve_unknown(unknown, paths, embs, appearance, characters, sources, model
     if gallery and unknown:
         gallery.fetch_refs([t for i in unknown for t in shortlist[i]], tagger)
         unknown = accept(unknown, gallery.match(embs[unknown], args.gallery_threshold), "reference")
-
-    if trained and unknown:
-        preds = trained.predict([paths[i] for i in unknown], args.batch_size)
-        unknown = accept(unknown, [p if p[1] >= args.trained_threshold else None for p in preds], "trained")
 
     for i in unknown:
         if i in series_titles:
@@ -728,6 +751,7 @@ def process_chunk(paths, models, args, output, label, done_file):
 
     characters = [(None, None)] * len(paths)
     sources = [""] * len(paths)
+    suspicious = {}
     anime = [i for i, c in enumerate(categories) if c == ANIME]
     if anime:
         labels, flags, looks, multi = tagger.tag([paths[i] for i in anime], args.batch_size, args.character_threshold, args.nsfw_threshold)
@@ -736,12 +760,27 @@ def process_chunk(paths, models, args, output, label, done_file):
             characters[i] = char
             sources[i] = "tagger" if char[1] else ""
             r18[i] = r18[i] or (flag and nsfw is not None)
-        known = [i for i, m in zip(anime, multi) if characters[i][1] and not m]
+        singles = [i for i, m in zip(anime, multi) if not m]
+        confident = {}
+        if trained and singles:
+            for i, (char, c) in zip(singles, trained.predict([paths[i] for i in singles], args.batch_size)):
+                if c >= args.trained_threshold:
+                    confident[i] = (char, c)
+        unknown = [i for i in singles if characters[i][1] is None]
+        resolve_unknown(unknown, embs, appearance, characters, sources, models, args, confident)
+        for i, (char, c) in confident.items():
+            other, other_source = characters[i], sources[i]
+            if conflicts(char, other):
+                suspicious[i] = {"trained": list(char), "other": list(other), "source": other_source, "score": round(c, 3)}
+                sources[i] = f"trained {c:.2f}, SUSPICIOUS vs {other_source}"
+            else:
+                sources[i] = f"trained {c:.2f}" + (f" + {other_source}" if other_source else "")
+            characters[i] = char
+        known = [i for i in singles if sources[i].startswith("tagger") or ("+ tagger" in sources[i])]
         if gallery and known:
             gallery.add(embs[known], [characters[i] for i in known])
-        unknown = [i for i, m in zip(anime, multi) if characters[i][1] is None and not m]
-        resolve_unknown(unknown, paths, embs, appearance, characters, sources, models, args)
 
+    sus_entries = load_sus() if suspicious else []
     for n, (path, cat, conf, (title, char), flag, src) in enumerate(zip(paths, categories, confs, characters, r18, sources), 1):
         try:
             dest = ((output / R18 if flag else output) / cat).joinpath(*(pretty(x) for x in (title, char) if x))
@@ -751,9 +790,14 @@ def process_chunk(paths, models, args, output, label, done_file):
             if done_file:
                 with done_file.open("a", encoding="utf-8") as f:
                     f.write(f"{path}\n")
+            if n - 1 in suspicious:
+                sus_entries = [e for e in sus_entries if e["path"] != str(dest)] + [{"path": str(dest), **suspicious[n - 1]}]
             log(f"[{label} | {n}/{len(paths)}] {path.name} -> {dest.relative_to(output)} ({conf:.2f}{', ' + src if src else ''})")
         except Exception as e:
             log(f"[{label} | {n}/{len(paths)}] Skip {path.name}: {e}")
+    if suspicious:
+        save_sus(sus_entries)
+        log(f"{len(suspicious)} suspicious images recorded in {SUS_FILE}")
     return categories, r18
 
 
