@@ -25,8 +25,9 @@ def parse_args():
     p.add_argument("--task", choices=("1", "2", "3", "4", "5"), help="1 sort unclassed, 2 fix wrong category, 3 resolve suspicious, 4 train only, 5 roll back model")
     p.add_argument("--skip-labeling", action="store_true", help="Same as --task 4")
     p.add_argument("--fresh", action="store_true", help="Retrain from the original model instead of the last trained copy")
-    p.add_argument("--no-ask", action="store_true", help="Unattended: skip unclear Danbooru matches (asked next time), auto-recover and auto-train")
-    p.add_argument("--relink", action="store_true", help="Ask again for characters and series earlier marked as not on Danbooru")
+    p.add_argument("--no-ask", action="store_true", help="Unattended: record unclear Danbooru matches as pending, auto-recover and auto-train")
+    p.add_argument("--resolve-untagged", action="store_true", help="Ask about characters and series left pending by --no-ask")
+    p.add_argument("--relink", action="store_true", help="Ask again for pending ones and those marked as not on Danbooru")
     p.add_argument("--no-link", action="store_true", help="Do not look up new characters on Danbooru")
     p.add_argument("--no-suggest", action="store_true", help="Do not load models for label suggestions")
     p.add_argument("--corrections", type=Path, help="Text file of wrongly sorted characters, see README")
@@ -69,7 +70,7 @@ def main():
     elif task != "4":
         raise SystemExit("Choose 1-5")
     if not args.no_link and task != "2":
-        link_new_characters(root, args.model, args.relink, not args.no_ask)
+        link_new_characters(root, args.model, args.relink, not args.no_ask, args.resolve_untagged)
     if task != "4" and not args.no_ask and input("Train now? [Y/n]: ").strip().lower() not in ("", "y", "yes"):
         return
     items = [(p, [label]) for p, label in labeled_images(root)]

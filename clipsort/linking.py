@@ -12,6 +12,19 @@ from .siglip import Sorter, pick_device
 
 
 SKIP = "__skip__"
+PENDING = "__pending__"
+
+
+def needs_link(linked, key, relink=False, resolve=False):
+    if key not in linked:
+        return True
+    return (linked[key] == PENDING and (resolve or relink)) or (linked[key] is None and relink)
+
+
+def report_pending(linked):
+    pending = [key for key, value in linked.items() if value == PENDING]
+    if pending:
+        log(f"{len(pending)} characters/series pending a Danbooru tag, run with --resolve-untagged to answer them")
 
 
 def ask_tag(prompt, found, category, ask=True):
@@ -53,11 +66,12 @@ def add_to_pool(sorter, model_id, tag):
     torch.save(cache, cache_file)
 
 
-def link_new_characters(root, model_id, relink=False, ask=True):
+def link_new_characters(root, model_id, relink=False, ask=True, resolve=False):
     linked = json.loads(LINKED_FILE.read_text(encoding="utf-8")) if LINKED_FILE.exists() else {}
     labels = sorted({label for _, label in labeled_images(root)})
-    new = [label for label in labels if "|".join(label) not in linked or (relink and linked["|".join(label)] is None)]
+    new = [label for label in labels if needs_link(linked, "|".join(label), relink, resolve)]
     if not new:
+        report_pending(linked)
         return
     log(f"Linking {len(new)} new characters to Danbooru...")
     sorter = Sorter(model_id, pick_device())
@@ -66,7 +80,9 @@ def link_new_characters(root, model_id, relink=False, ask=True):
         try:
             tag = choose_tag(title, char, ask)
             if tag == SKIP:
-                log(f"[{n}/{len(new)}] {pretty(char)} ({pretty(title)}): unclear match, skipped, will ask next time")
+                linked["|".join((title, char))] = PENDING
+                LINKED_FILE.write_text(json.dumps(linked, indent=1, ensure_ascii=False), encoding="utf-8")
+                log(f"[{n}/{len(new)}] {pretty(char)} ({pretty(title)}): unclear match, recorded as pending")
                 continue
             images = danbooru_reference_images(tag, LINK_IMAGES) if tag else []
         except Exception as e:
@@ -87,5 +103,6 @@ def link_new_characters(root, model_id, relink=False, ask=True):
     LINKED_FILE.write_text(json.dumps(linked, indent=1, ensure_ascii=False), encoding="utf-8")
     save_aliases(aliases)
     gallery.save()
+    report_pending(linked)
     del sorter
     torch.cuda.empty_cache()
