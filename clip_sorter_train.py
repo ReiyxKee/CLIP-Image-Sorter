@@ -25,7 +25,7 @@ def parse_args():
     p.add_argument("--task", choices=("1", "2", "3", "4", "5"), help="1 sort unclassed, 2 fix wrong category, 3 resolve suspicious, 4 train only, 5 roll back model")
     p.add_argument("--skip-labeling", action="store_true", help="Same as --task 4")
     p.add_argument("--fresh", action="store_true", help="Retrain from the original model instead of the last trained copy")
-    p.add_argument("--no-ask", action="store_true", help="Skip unclear Danbooru matches instead of asking; they are asked next time")
+    p.add_argument("--no-ask", action="store_true", help="Unattended: skip unclear Danbooru matches (asked next time), auto-recover and auto-train")
     p.add_argument("--relink", action="store_true", help="Ask again for characters and series earlier marked as not on Danbooru")
     p.add_argument("--no-link", action="store_true", help="Do not look up new characters on Danbooru")
     p.add_argument("--no-suggest", action="store_true", help="Do not load models for label suggestions")
@@ -45,7 +45,7 @@ def main():
         log(f"Warning: unfinished correction session found for {pending.get('root')} (stopped at stage '{pending.get('stage')}')")
         if pending.get("root") != str(root):
             log(f"It belongs to another folder. Run with --target-path \"{pending.get('root')}\" to recover it.")
-        elif input("Recover it now? [Y/n]: ").strip().lower() in ("", "y", "yes"):
+        elif args.no_ask or input("Recover it now? [Y/n]: ").strip().lower() in ("", "y", "yes"):
             task, resume = "2", True
         elif input("Discard it? [y/N]: ").strip().lower() in ("y", "yes"):
             SESSION_FILE.unlink()
@@ -70,7 +70,7 @@ def main():
         raise SystemExit("Choose 1-5")
     if not args.no_link and task != "2":
         link_new_characters(root, args.model, args.relink, not args.no_ask)
-    if task != "4" and input("Train now? [Y/n]: ").strip().lower() not in ("", "y", "yes"):
+    if task != "4" and not args.no_ask and input("Train now? [Y/n]: ").strip().lower() not in ("", "y", "yes"):
         return
     items = [(p, [label]) for p, label in labeled_images(root)]
     items += [(root / rel, [tuple(l) for l in group]) for rel, group in load_multi(root).items() if (root / rel).exists()]
