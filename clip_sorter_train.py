@@ -5,7 +5,7 @@ from pathlib import Path
 
 from clipsort.config import MODEL_ID, SESSION_FILE
 from clipsort.corrections import apply_corrections, parse_corrections, run_corrections
-from clipsort.finetune import train
+from clipsort.finetune import rollback, train
 from clipsort.gallery import Gallery
 from clipsort.labeling import label_images, load_multi, suspicious_images, unlabeled_images
 from clipsort.linking import link_new_characters
@@ -22,7 +22,7 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--unfreeze", type=int, default=2, help="Last vision layers to fine-tune, 0 = classifier only")
     p.add_argument("--lr", type=float, default=1e-5)
-    p.add_argument("--task", choices=("1", "2", "3", "4"), help="1 sort unclassed, 2 fix wrong category, 3 resolve suspicious, 4 train only")
+    p.add_argument("--task", choices=("1", "2", "3", "4", "5"), help="1 sort unclassed, 2 fix wrong category, 3 resolve suspicious, 4 train only, 5 roll back model")
     p.add_argument("--skip-labeling", action="store_true", help="Same as --task 4")
     p.add_argument("--fresh", action="store_true", help="Retrain from the original model instead of the last trained copy")
     p.add_argument("--relink", action="store_true", help="Ask again for characters and series earlier marked as not on Danbooru")
@@ -53,7 +53,8 @@ def main():
         print("2) Fix wrong category (detect images you moved by hand)")
         print(f"3) Resolve suspicious ({len(suspicious_images(root))})")
         print("4) Train only")
-        task = input("Choose [1-4]: ").strip()
+        print("5) Roll back trained model")
+        task = input("Choose [1-5]: ").strip()
     if task == "1":
         label_images(root, unlabeled_images(root), args)
     elif task == "2" and args.corrections:
@@ -62,8 +63,10 @@ def main():
         run_corrections(root, args, resume)
     elif task == "3":
         label_images(root, suspicious_images(root), args)
+    elif task == "5":
+        return rollback()
     elif task != "4":
-        raise SystemExit("Choose 1-4")
+        raise SystemExit("Choose 1-5")
     if not args.no_link and task != "2":
         link_new_characters(root, args.model, args.relink)
     if task != "4" and input("Train now? [Y/n]: ").strip().lower() not in ("", "y", "yes"):

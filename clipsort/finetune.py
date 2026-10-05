@@ -1,6 +1,7 @@
 """Fine-tuning."""
 import json
 import random
+from datetime import datetime
 import shutil
 import torch
 import torch.nn.functional as F
@@ -11,7 +12,7 @@ from torchvision import transforms
 from transformers import AutoModel
 from transformers import AutoProcessor
 
-from .config import RETRAIN_FILE, TRAINED_DIR
+from .config import KEEP_VERSIONS, RETRAIN_FILE, TRAINED_DIR
 from .logs import log, progress
 from .siglip import features
 
@@ -103,7 +104,35 @@ def save_trained(model, processor, head, labels):
     save_file({"weight": head.weight.detach().cpu().contiguous(), "bias": head.bias.detach().cpu().contiguous()}, staging / "head.safetensors")
     (staging / "labels.json").write_text(json.dumps([list(l) for l in labels]), encoding="utf-8")
     del model
-    shutil.rmtree(TRAINED_DIR, ignore_errors=True)
+    shutil.rmtree(version_dir(KEEP_VERSIONS - 1), ignore_errors=True)
+    for n in range(KEEP_VERSIONS - 2, -1, -1):
+        if version_dir(n).exists():
+            version_dir(n).rename(version_dir(n + 1))
     staging.rename(TRAINED_DIR)
     RETRAIN_FILE.unlink(missing_ok=True)
-    log(f"Saved trained model to {TRAINED_DIR}")
+    log(f"Saved trained model to {TRAINED_DIR}, older versions kept: {sum(version_dir(n).exists() for n in range(1, KEEP_VERSIONS))}")
+
+
+def version_dir(n):
+    return TRAINED_DIR if n == 0 else TRAINED_DIR.with_name(f"{TRAINED_DIR.name}.{n}")
+
+
+def describe_version(n):
+    path = version_dir(n)
+    labels = json.loads((path / "labels.json").read_text(encoding="utf-8"))
+    return f"{'current' if n == 0 else f'{n} behind'}: trained {datetime.fromtimestamp((path / 'head.safetensors').stat().st_mtime):%Y-%m-%d %H:%M}, {len(labels)} characters"
+
+
+def rollback():
+    versions = [n for n in range(KEEP_VERSIONS) if (version_dir(n) / "labels.json").exists()]
+    for n in versions:
+        print(f"  {describe_version(n)}")
+    if 1 not in versions:
+        raise SystemExit("No older model to roll back to")
+    if input("Roll back to the previous version? The current one is deleted [y/N]: ").strip().lower() not in ("y", "yes"):
+        return
+    shutil.rmtree(TRAINED_DIR)
+    for n in range(1, KEEP_VERSIONS):
+        if version_dir(n).exists():
+            version_dir(n).rename(version_dir(n - 1))
+    log(f"Rolled back. {describe_version(0)}")

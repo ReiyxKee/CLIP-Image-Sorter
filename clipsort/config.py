@@ -31,6 +31,7 @@ APPEARANCE_THRESHOLD = 0.35
 GALLERY_THRESHOLD = 0.9
 GALLERY_MARGIN = 0.03
 TRAINED_THRESHOLD = 0.9
+KEEP_VERSIONS = 3
 TRAINED_DIR = Path(os.environ["HF_HOME"]) / "finetuned"
 SUS_FILE = Path(os.environ["HF_HOME"]) / "suspicious.json"
 OVERRIDES_FILE = Path(os.environ["HF_HOME"]) / "series_overrides.json"

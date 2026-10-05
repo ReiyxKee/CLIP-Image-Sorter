@@ -60,7 +60,9 @@ Series names come from Danbooru and are cached in `./models`.
 python clip_sorter_train.py --target-path ./pics_sorted
 ```
 
-Menu: `1` sort unclassed images, `2` fix wrong category, `3` resolve suspicious, `4` train only (or `--task 1-4`). Training follows.
+Menu: `1` sort unclassed images, `2` fix wrong category, `3` resolve suspicious, `4` train only, `5` roll back the trained model (or `--task 1-5`). Training follows.
+
+The last 3 trained models are kept: `models/finetuned` (current), `finetuned.1` and `finetuned.2` (older). Each training shifts them back one; option `5` restores the previous one (~1.6 GB each).
 
 Fix wrong category: move misplaced images (or whole character folders) to the right `<Series>/<Character>/` folder yourself, then run option `2`. You can also drop uncategorized images of one series straight into a `<Series>/` folder: option `2` finds the series and its cast on Danbooru and sorts them into character folders, leaving unsure ones for option `1`.
 
