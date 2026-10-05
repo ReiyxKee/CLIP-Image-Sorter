@@ -3,12 +3,29 @@ import json
 import torch
 
 from .config import LINKED_FILE, LINK_IMAGES, QUALIFIER, TRAINED_DIR
-from .danbooru import danbooru_find_tags, danbooru_reference_images
+from .danbooru import danbooru_find_tags, danbooru_reference_images, danbooru_tag_exists
 from .gallery import Gallery
 from .logs import log
 from .names import base_name, describe, legalize, pretty, title_name
 from .records import labeled_images, load_aliases, save_aliases
 from .siglip import Sorter, pick_device
+
+
+def ask_tag(prompt, found, category):
+    options = "  ".join(f"{i}) {name} ({count})" for i, (name, count) in enumerate(found[:5], 1)) or "no matches found"
+    while True:
+        answer = input(f"  {prompt}: {options}  [number / type a Danbooru tag / Enter = none]: ").strip()
+        if not answer:
+            return None
+        if answer.isdigit() and 1 <= int(answer) <= min(5, len(found)):
+            return found[int(answer) - 1][0]
+        tag = answer.lower().replace(" ", "_")
+        try:
+            if danbooru_tag_exists(tag, category):
+                return tag
+            print(f"  '{tag}' is not a Danbooru {'series' if category == 3 else 'character'} tag, try again")
+        except Exception as e:
+            print(f"  Could not check '{tag}' on Danbooru ({e}), try again")
 
 
 def choose_tag(title, char):
@@ -19,11 +36,7 @@ def choose_tag(title, char):
         return same_series[0]
     if len(exact) == 1:
         return exact[0]
-    if not found:
-        return None
-    options = "  ".join(f"{i}) {name} ({count})" for i, (name, count) in enumerate(found[:5], 1))
-    answer = input(f"  Danbooru tag for {pretty(char)} ({pretty(title)}): {options}  [number / Enter = none]: ").strip()
-    return found[int(answer) - 1][0] if answer.isdigit() and 1 <= int(answer) <= min(5, len(found)) else None
+    return ask_tag(f"Danbooru tag for {pretty(char)} ({pretty(title)})", found, 4)
 
 
 def add_to_pool(sorter, model_id, tag):
@@ -35,10 +48,10 @@ def add_to_pool(sorter, model_id, tag):
     torch.save(cache, cache_file)
 
 
-def link_new_characters(root, model_id):
+def link_new_characters(root, model_id, relink=False):
     linked = json.loads(LINKED_FILE.read_text(encoding="utf-8")) if LINKED_FILE.exists() else {}
     labels = sorted({label for _, label in labeled_images(root)})
-    new = [label for label in labels if "|".join(label) not in linked]
+    new = [label for label in labels if "|".join(label) not in linked or (relink and linked["|".join(label)] is None)]
     if not new:
         return
     log(f"Linking {len(new)} new characters to Danbooru...")

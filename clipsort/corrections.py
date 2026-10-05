@@ -8,7 +8,7 @@ from .config import ANIME, CAST_LIMIT, DISCOVER_GALLERY, DISCOVER_TAGGER, LINKED
 from .danbooru import danbooru_find_tags, danbooru_reference_images, danbooru_related
 from .files import collect_images, original_stem, remove_empty_dirs, transfer_unique
 from .gallery import Gallery
-from .linking import link_new_characters
+from .linking import ask_tag, link_new_characters
 from .logs import log, progress
 from .names import base_name, legalize, pretty, title_name
 from .records import load_aliases, load_index, load_overrides, load_sus, save_aliases, save_index, save_overrides, save_sus
@@ -110,11 +110,7 @@ def choose_series_tag(slug):
     exact = [name for name, _ in found if legalize(title_name(name)).lower() == slug or legalize(base_name(name)).lower() == slug]
     if exact:
         return exact[0]
-    if not found:
-        return None
-    options = "  ".join(f"{i}) {name} ({count})" for i, (name, count) in enumerate(found[:5], 1))
-    answer = input(f"  Danbooru series for {pretty(slug)}: {options}  [number / Enter = none]: ").strip()
-    return found[int(answer) - 1][0] if answer.isdigit() and 1 <= int(answer) <= min(5, len(found)) else None
+    return ask_tag(f"Danbooru series for {pretty(slug)}", found, 3)
 
 
 def detect_drift(root):
@@ -200,7 +196,7 @@ def loose_series_images(root):
     return loose
 
 
-def discover(root, model_id, session):
+def discover(root, model_id, session, relink=False):
     loose = loose_series_images(root)
     if not loose:
         return
@@ -213,7 +209,7 @@ def discover(root, model_id, session):
     for series_dir, paths in loose.items():
         slug = legalize(series_dir.name).lower()
         key = f"series|{slug}"
-        if key not in linked:
+        if key not in linked or (relink and linked[key] is None):
             try:
                 linked[key] = choose_series_tag(slug)
             except Exception as e:
@@ -303,8 +299,8 @@ def run_corrections(root, args, resume):
         session = {"root": str(root), "stage": "moves", "drifts": detect_drift(root), "casts": {}, "proposals": []}
         save_session(session)
     for stage, step in (("moves", lambda: apply_drift(root, args.model, session)),
-                        ("link", lambda: None if args.no_link else link_new_characters(root, args.model)),
-                        ("discover", lambda: discover(root, args.model, session)),
+                        ("link", lambda: None if args.no_link else link_new_characters(root, args.model, args.relink)),
+                        ("discover", lambda: discover(root, args.model, session, args.relink)),
                         ("finalize", lambda: finalize(root, session))):
         if session["stage"] == stage:
             log(f"Correction stage: {stage}")

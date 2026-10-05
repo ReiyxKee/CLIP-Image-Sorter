@@ -38,6 +38,12 @@ def danbooru_find_tags(name, category=4):
     return found
 
 
+def danbooru_tag_exists(name, category):
+    params = urlencode({"search[name]": name, "search[category]": category, "only": "name"})
+    with urlopen(Request(f"{DANBOORU}/tags.json?{params}", headers=DANBOORU_HEADERS), timeout=15) as r:
+        return bool(json.load(r))
+
+
 def danbooru_reference_images(tag, count):
     try:
         params = urlencode({"tags": f"{tag} solo", "limit": 20})
