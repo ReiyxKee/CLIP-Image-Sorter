@@ -85,7 +85,7 @@ Unknown Title/Kirito -> Sword Art Online/Kirito
 
 Corrections also fix the reference gallery, so wrong pictures stop spreading.
 
-New character folders you create are linked to Danbooru before training: the matching tag is found (you pick when unclear), 10 reference pictures go into the gallery, the name joins the fallback pool, and future detections of that tag are filed under your folder names. When unsure it lists matches; pick a number, type the exact Danbooru tag yourself (checked before use), or press Enter for none. Unknown characters (e.g. OCs) are learned from your images only. `--relink` asks again for names earlier marked as not on Danbooru; `--no-link` skips linking.
+New character folders you create are linked to Danbooru before training: the matching tag is found (you pick when unclear), 10 reference pictures go into the gallery, the name joins the fallback pool, and future detections of that tag are filed under your folder names. When unsure it lists matches; pick a number, type the exact Danbooru tag yourself (checked before use), or press Enter for none. Unknown characters (e.g. OCs) are learned from your images only. `--no-ask` skips unclear matches without pausing (they are asked on a later run); `--relink` asks again for names earlier marked as not on Danbooru; `--no-link` skips linking.
 
 Retraining continues from the last trained model, drops characters that no longer have images, and relearns any character touched by a correction from scratch. `--fresh` retrains everything from the original model.
 

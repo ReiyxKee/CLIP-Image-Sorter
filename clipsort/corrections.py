@@ -8,7 +8,7 @@ from .config import ANIME, CAST_LIMIT, DISCOVER_GALLERY, DISCOVER_TAGGER, LINKED
 from .danbooru import danbooru_find_tags, danbooru_reference_images, danbooru_related
 from .files import collect_images, original_stem, remove_empty_dirs, transfer_unique
 from .gallery import Gallery
-from .linking import ask_tag, link_new_characters
+from .linking import SKIP, ask_tag, link_new_characters
 from .logs import log, progress
 from .names import base_name, legalize, pretty, title_name
 from .records import load_aliases, load_index, load_overrides, load_sus, save_aliases, save_index, save_overrides, save_sus
@@ -105,12 +105,12 @@ def save_session(session):
     SESSION_FILE.write_text(json.dumps(session, indent=1, ensure_ascii=False), encoding="utf-8")
 
 
-def choose_series_tag(slug):
+def choose_series_tag(slug, ask=True):
     found = danbooru_find_tags(slug, 3)
     exact = [name for name, _ in found if legalize(title_name(name)).lower() == slug or legalize(base_name(name)).lower() == slug]
     if exact:
         return exact[0]
-    return ask_tag(f"Danbooru series for {pretty(slug)}", found, 3)
+    return ask_tag(f"Danbooru series for {pretty(slug)}", found, 3, ask)
 
 
 def detect_drift(root):
@@ -196,7 +196,7 @@ def loose_series_images(root):
     return loose
 
 
-def discover(root, model_id, session, relink=False):
+def discover(root, model_id, session, relink=False, ask=True):
     loose = loose_series_images(root)
     if not loose:
         return
@@ -211,10 +211,14 @@ def discover(root, model_id, session, relink=False):
         key = f"series|{slug}"
         if key not in linked or (relink and linked[key] is None):
             try:
-                linked[key] = choose_series_tag(slug)
+                tag = choose_series_tag(slug, ask)
             except Exception as e:
                 log(f"Series lookup failed for {series_dir.name}, will retry next time: {e}")
                 continue
+            if tag == SKIP:
+                log(f"{series_dir.name}: unclear series match, skipped, will ask next time")
+                continue
+            linked[key] = tag
             LINKED_FILE.write_text(json.dumps(linked, indent=1, ensure_ascii=False), encoding="utf-8")
         series_tag = linked[key]
         if not series_tag:
@@ -299,8 +303,8 @@ def run_corrections(root, args, resume):
         session = {"root": str(root), "stage": "moves", "drifts": detect_drift(root), "casts": {}, "proposals": []}
         save_session(session)
     for stage, step in (("moves", lambda: apply_drift(root, args.model, session)),
-                        ("link", lambda: None if args.no_link else link_new_characters(root, args.model, args.relink)),
-                        ("discover", lambda: discover(root, args.model, session, args.relink)),
+                        ("link", lambda: None if args.no_link else link_new_characters(root, args.model, args.relink, not args.no_ask)),
+                        ("discover", lambda: discover(root, args.model, session, args.relink, not args.no_ask)),
                         ("finalize", lambda: finalize(root, session))):
         if session["stage"] == stage:
             log(f"Correction stage: {stage}")
