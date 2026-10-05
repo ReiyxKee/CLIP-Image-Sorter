@@ -91,6 +91,32 @@ Ctrl+C during training stops early and still saves what was learned.
 
 Useful flags: `--skip-labeling`, `--epochs`, `--unfreeze 0` (classifier only, fast).
 
+## Project layout
+
+`clip_sorter.py` and `clip_sorter_train.py` are thin entry points; each feature lives in `clipsort/`:
+
+| Module | Feature |
+|---|---|
+| `setup.py` | Dependency check, CUDA torch, Hugging Face paths |
+| `hf_login.py` | Hugging Face CLI and login |
+| `config.py` | Constants and file paths |
+| `logs.py` | Console output and `Log/` files |
+| `names.py` | Name cleanup and prompt text |
+| `danbooru.py` | Danbooru API |
+| `files.py` | Image listing, moving, cleanup |
+| `records.py` | Index, suspicious list, aliases, series corrections |
+| `siglip.py` | SigLIP2 and main category |
+| `tagger.py` | WD Tagger |
+| `nsfw.py` | R18 check |
+| `pools.py` | Fallback pool and series-guided search |
+| `gallery.py` | Reference gallery and learn mode |
+| `trained.py` | Fine-tuned model |
+| `sorting.py` | Per-chunk sorting flow |
+| `labeling.py` | Labeling window and suggestions |
+| `corrections.py` | Fix wrong category stages and recovery |
+| `linking.py` | Danbooru linking for new characters |
+| `finetune.py` | Training |
+
 ## Models
 
 - [google/siglip2-so400m-patch14-384](https://huggingface.co/google/siglip2-so400m-patch14-384)
