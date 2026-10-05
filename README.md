@@ -38,6 +38,8 @@ pics_sorted/
 
 Runs in chunks and resumes where it stopped (`.sorted_sources.txt` in the output folder).
 
+Each run's log (command, every sorted file, errors with tracebacks) is saved to `./Log/<script>_<date_time>.log`.
+
 ## How anime characters are found
 
 Tried in order until one is confident:
