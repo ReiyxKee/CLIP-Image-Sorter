@@ -11,8 +11,9 @@ from difflib import get_close_matches
 from pathlib import Path, PurePosixPath
 
 from clip_sorter import (
-    ANIME, FALLBACK_COUNT, MODEL_ID, QUALIFIER, SERIES_COUNT, TAGGER_ID, TRAINED_DIR,
-    Expander, Gallery, Sorter, Tagger, TrainedModel, build_pool, describe, describe_series, base_name, collect_images, features, labeled_images,
+    ANIME, FALLBACK_COUNT, MODEL_ID, QUALIFIER, SERIES_COUNT, SESSION_FILE, TAGGER_ID, TRAINED_DIR,
+    Expander, Gallery, Sorter, Tagger, TrainedModel, build_pool, danbooru_find_tags, danbooru_reference_images, danbooru_related, REF_IMAGES,
+    describe, describe_series, load_aliases, save_aliases, base_name, collect_images, features, labeled_images,
     legalize, load_index, load_overrides, load_sus, log, original_stem, save_index, save_overrides, save_sus, pick_device, pretty, progress, remove_empty_dirs, title_name, transfer_unique,
 )
 
@@ -35,6 +36,7 @@ def parse_args():
     p.add_argument("--task", choices=("1", "2", "3", "4"), help="1 sort unclassed, 2 fix wrong category, 3 resolve suspicious, 4 train only")
     p.add_argument("--skip-labeling", action="store_true", help="Same as --task 4")
     p.add_argument("--fresh", action="store_true", help="Retrain from the original model instead of the last trained copy")
+    p.add_argument("--no-link", action="store_true", help="Do not look up new characters on Danbooru")
     p.add_argument("--no-suggest", action="store_true", help="Do not load models for label suggestions")
     p.add_argument("--corrections", type=Path, help="Text file of wrongly sorted characters, see README")
     return p.parse_args()
@@ -229,6 +231,94 @@ def label_of_rel(rel):
 
 
 RETRAIN_FILE = TRAINED_DIR.parent / "retrain_labels.json"
+LINKED_FILE = TRAINED_DIR.parent / "linked_characters.json"
+LINK_IMAGES = 10
+DISCOVER_TAGGER = 0.5
+DISCOVER_GALLERY = 0.85
+CAST_LIMIT = 100
+
+
+def load_session(root):
+    if not SESSION_FILE.exists():
+        return None
+    session = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+    return session if session.get("root") == str(root) else None
+
+
+def save_session(session):
+    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SESSION_FILE.write_text(json.dumps(session, indent=1, ensure_ascii=False), encoding="utf-8")
+
+
+def choose_series_tag(slug):
+    found = danbooru_find_tags(slug, 3)
+    exact = [name for name, _ in found if legalize(title_name(name)).lower() == slug or legalize(base_name(name)).lower() == slug]
+    if exact:
+        return exact[0]
+    if not found:
+        return None
+    options = "  ".join(f"{i}) {name} ({count})" for i, (name, count) in enumerate(found[:5], 1))
+    answer = input(f"  Danbooru series for {pretty(slug)}: {options}  [number / Enter = none]: ").strip()
+    return found[int(answer) - 1][0] if answer.isdigit() and 1 <= int(answer) <= min(5, len(found)) else None
+
+
+def choose_tag(title, char):
+    found = danbooru_find_tags(char)
+    exact = [name for name, _ in found if legalize(base_name(name)).lower() == char]
+    same_series = [name for name in exact if any(legalize(title_name(q)).lower() == title for q in QUALIFIER.findall(name))]
+    if same_series:
+        return same_series[0]
+    if len(exact) == 1:
+        return exact[0]
+    if not found:
+        return None
+    options = "  ".join(f"{i}) {name} ({count})" for i, (name, count) in enumerate(found[:5], 1))
+    answer = input(f"  Danbooru tag for {pretty(char)} ({pretty(title)}): {options}  [number / Enter = none]: ").strip()
+    return found[int(answer) - 1][0] if answer.isdigit() and 1 <= int(answer) <= min(5, len(found)) else None
+
+
+def add_to_pool(sorter, model_id, tag):
+    cache_file = TRAINED_DIR.parent / "expand_cache.pt"
+    cache = torch.load(cache_file) if cache_file.exists() else {}
+    if cache.get("model") != model_id:
+        cache = {"model": model_id, "queries": cache.get("queries", {}), "embs": {}}
+    cache["embs"][tag] = sorter.embed_texts([describe(tag)])[0].cpu()
+    torch.save(cache, cache_file)
+
+
+def link_new_characters(root, model_id):
+    linked = json.loads(LINKED_FILE.read_text(encoding="utf-8")) if LINKED_FILE.exists() else {}
+    labels = sorted({label for _, label in labeled_images(root)})
+    new = [label for label in labels if "|".join(label) not in linked]
+    if not new:
+        return
+    log(f"Linking {len(new)} new characters to Danbooru...")
+    sorter = Sorter(model_id, pick_device())
+    gallery, aliases = Gallery(sorter, model_id), load_aliases()
+    for n, (title, char) in enumerate(new, 1):
+        try:
+            tag = choose_tag(title, char)
+            images = danbooru_reference_images(tag, LINK_IMAGES) if tag else []
+        except Exception as e:
+            log(f"[{n}/{len(new)}] {pretty(char)}: Danbooru lookup failed, will retry next time: {e}")
+            continue
+        linked["|".join((title, char))] = tag
+        if not tag:
+            log(f"[{n}/{len(new)}] {pretty(char)} ({pretty(title)}): not found on Danbooru, learning from your images only")
+            continue
+        aliases[tag] = [title, char]
+        add_to_pool(sorter, model_id, tag)
+        if images:
+            gallery.add(sorter.embed_pil(images), [(title, char)] * len(images))
+            gallery.fetched.add(tag)
+        log(f"[{n}/{len(new)}] {pretty(char)} ({pretty(title)}) -> {tag}, {len(images or [])} reference pictures")
+        LINKED_FILE.write_text(json.dumps(linked, indent=1, ensure_ascii=False), encoding="utf-8")
+        save_aliases(aliases)
+    LINKED_FILE.write_text(json.dumps(linked, indent=1, ensure_ascii=False), encoding="utf-8")
+    save_aliases(aliases)
+    gallery.save()
+    del sorter
+    torch.cuda.empty_cache()
 
 
 def mark_retrain(*labels):
@@ -251,7 +341,7 @@ def reindex(root, old_path, new_path):
     save_index(root, index)
 
 
-def fix_drift(root, model_id):
+def detect_drift(root):
     index = load_index(root)
     current = {p.relative_to(root).as_posix(): p for p in collect_images(root, root)}
     if not index:
@@ -259,8 +349,8 @@ def fix_drift(root, model_id):
             title, char = label_of_rel(rel)
             index[rel] = {"dest": rel, "source": "", "title": title, "char": char}
         save_index(root, index)
-        log(f"No index yet. Recorded the current layout of {len(index)} images as the baseline; move files to fix them, then run this again.")
-        return
+        log(f"No index yet. Recorded the current layout of {len(index)} images as the baseline.")
+        return []
     unindexed = {}
     for rel in current:
         if rel not in index:
@@ -271,21 +361,27 @@ def fix_drift(root, model_id):
             continue
         candidates = unindexed.get(PurePosixPath(rel).name, [])
         if len(candidates) == 1:
-            drifts.append((rel, candidates.pop(), entry))
+            drifts.append({"old": rel, "new": candidates.pop(), "entry": entry, "done": False})
         else:
             missing.append(rel)
     for rel in missing:
         index.pop(rel)
+    save_index(root, index)
     if missing:
         log(f"{len(missing)} indexed images were deleted or are ambiguous, dropped from the index")
-    if not drifts:
-        save_index(root, index)
-        log("No moved images found")
+    log(f"{len(drifts)} moved images found")
+    return drifts
+
+
+def apply_drift(root, model_id, session):
+    todo = [d for d in session["drifts"] if not d["done"]]
+    if not todo:
         return
-    log(f"{len(drifts)} moved images found, updating index, gallery and series...")
+    log(f"Applying {len(todo)} moves to index, gallery and series...")
     sorter = Sorter(model_id, pick_device())
-    gallery, overrides, sus = Gallery(sorter, model_id), load_overrides(), load_sus()
-    for n, (old, new, entry) in enumerate(drifts, 1):
+    gallery, overrides = Gallery(sorter, model_id), load_overrides()
+    for n, drift in enumerate(todo, 1):
+        old, new, entry = drift["old"], drift["new"], drift["entry"]
         old_label, new_label = (entry.get("title"), entry.get("char")), label_of_rel(new)
         path = root / new
         try:
@@ -299,21 +395,148 @@ def fix_drift(root, model_id):
                     gallery.add(embs, [new_label])
         except Exception as e:
             log(f"Skip {new}: {e}")
+            drift["done"] = True
+            save_session(session)
             continue
         if old_label[1] and old_label[1] == new_label[1] and new_label[0] and (old_label[0] or "").lower() != new_label[0]:
             overrides[new_label[1]] = new_label[0]
+        index = load_index(root)
         index.pop(old, None)
         index[new] = {**entry, "dest": new, "title": new_label[0], "char": new_label[1]}
+        save_index(root, index)
         if label_of_rel(old)[1] and label_of_rel(old) != new_label:
             mark_retrain(label_of_rel(old), new_label)
-        sus = [e for e in sus if e["path"] != str(root / old)]
-        log(f"[{n}/{len(drifts)}] {old} -> {new}")
-    save_index(root, index)
-    save_overrides(overrides)
-    save_sus(sus)
+        save_sus([e for e in load_sus() if e["path"] != str(root / old)])
+        save_overrides(overrides)
+        drift["done"] = True
+        save_session(session)
+        log(f"[{n}/{len(todo)}] {old} -> {new}")
     gallery.save()
     remove_empty_dirs(root)
-    log(f"Fixed {len(drifts)} images. Series corrections on file: {len(overrides)}")
+
+
+def loose_series_images(root):
+    loose = {}
+    for p in collect_images(root, root):
+        parts = p.relative_to(root).parts
+        if ANIME in parts and len(parts) - parts.index(ANIME) == 3:
+            loose.setdefault(root.joinpath(*parts[:parts.index(ANIME) + 2]), []).append(p)
+    return loose
+
+
+def discover(root, model_id, session):
+    loose = loose_series_images(root)
+    if not loose:
+        return
+    log(f"Discovering characters for {sum(map(len, loose.values()))} images in {len(loose)} series folders...")
+    device = pick_device()
+    sorter, tagger = Sorter(model_id, device), Tagger(TAGGER_ID, device)
+    gallery = Gallery(sorter, model_id)
+    linked = json.loads(LINKED_FILE.read_text(encoding="utf-8")) if LINKED_FILE.exists() else {}
+    proposed = {p["path"] for p in session["proposals"]}
+    for series_dir, paths in loose.items():
+        slug = legalize(series_dir.name).lower()
+        key = f"series|{slug}"
+        if key not in linked:
+            try:
+                linked[key] = choose_series_tag(slug)
+            except Exception as e:
+                log(f"Series lookup failed for {series_dir.name}, will retry next time: {e}")
+                continue
+            LINKED_FILE.write_text(json.dumps(linked, indent=1, ensure_ascii=False), encoding="utf-8")
+        series_tag = linked[key]
+        if not series_tag:
+            log(f"{series_dir.name}: not found on Danbooru, label these with option 1")
+            continue
+        if series_tag not in session["casts"]:
+            try:
+                session["casts"][series_tag] = danbooru_related(series_tag, "character", CAST_LIMIT)
+            except Exception as e:
+                log(f"Cast lookup failed for {series_tag}, will retry next time: {e}")
+                continue
+            save_session(session)
+        cast = {tag: (slug, legalize(base_name(tag)).lower()) for tag in session["casts"][series_tag]}
+        tag_of = {label: tag for tag, label in reversed(list(cast.items()))}
+        todo = [tag for tag in cast if tag not in gallery.fetched]
+        for n, tag in enumerate(todo, 1):
+            progress(f"Fetching {series_dir.name} cast pictures", n, len(todo))
+            images = danbooru_reference_images(tag, REF_IMAGES)
+            if images is None:
+                continue
+            gallery.fetched.add(tag)
+            if images:
+                gallery.add(sorter.embed_pil(images), [cast[tag]] * len(images))
+        gallery.save()
+        cast_rows = [(i, name) for i, name in enumerate(tagger.char_names) if name in cast]
+        for n, path in enumerate(paths, 1):
+            progress(f"Matching {series_dir.name} images", n, len(paths))
+            rel = path.relative_to(root).as_posix()
+            if rel in proposed:
+                continue
+            label, score, source, tag = None, 0.0, "", None
+            try:
+                if cast_rows:
+                    probs = tagger.probabilities([path])[0][tagger.char_idx]
+                    best = max(cast_rows, key=lambda r: probs[r[0]])
+                    if probs[best[0]] >= DISCOVER_TAGGER:
+                        tag, score, source = best[1], probs[best[0]].item(), "tagger"
+                        label = cast[tag]
+                if label is None:
+                    _, embs = sorter.embed_images([path], 1)
+                    match = gallery.match(embs, DISCOVER_GALLERY, set(cast.values()))[0] if len(embs) else None
+                    if match:
+                        label, score, source = match[0], match[1], "reference"
+                        tag = tag_of.get(label)
+            except Exception as e:
+                log(f"Skip {path.name}: {e}")
+                continue
+            session["proposals"].append({"path": rel, "label": list(label) if label else None, "tag": tag, "score": round(score, 3), "source": source, "moved": False})
+            save_session(session)
+    LINKED_FILE.write_text(json.dumps(linked, indent=1, ensure_ascii=False), encoding="utf-8")
+
+
+def finalize(root, session):
+    aliases = load_aliases()
+    todo = [p for p in session["proposals"] if p["label"] and not p["moved"]]
+    unsure = sum(1 for p in session["proposals"] if not p["label"])
+    for n, prop in enumerate(todo, 1):
+        path = root / prop["path"]
+        if path.exists():
+            parts = path.relative_to(root).parts
+            anime_dir = root.joinpath(*parts[:parts.index(ANIME) + 1])
+            title, char = prop["label"]
+            try:
+                dest = transfer_unique(path, anime_dir / pretty(title) / pretty(char), "move", f"{char}_{original_stem(path)[:10]}")
+                reindex(root, path, dest)
+                log(f"[{n}/{len(todo)}] {prop['path']} -> {dest.relative_to(root)} ({prop['source']} {prop['score']:.2f})")
+            except Exception as e:
+                log(f"Skip {path.name}: {e}")
+            if prop["tag"]:
+                aliases[prop["tag"]] = [title, char]
+                save_aliases(aliases)
+        prop["moved"] = True
+        save_session(session)
+    log(f"Sorted {len(todo)} images into character folders, {unsure} left in series folders for option 1")
+
+
+def run_corrections(root, args, resume):
+    session = load_session(root) if resume else None
+    if session is None:
+        if SESSION_FILE.exists():
+            log("Starting a new correction session, the unfinished one is replaced")
+        session = {"root": str(root), "stage": "moves", "drifts": detect_drift(root), "casts": {}, "proposals": []}
+        save_session(session)
+    for stage, step in (("moves", lambda: apply_drift(root, args.model, session)),
+                        ("link", lambda: None if args.no_link else link_new_characters(root, args.model)),
+                        ("discover", lambda: discover(root, args.model, session)),
+                        ("finalize", lambda: finalize(root, session))):
+        if session["stage"] == stage:
+            log(f"Correction stage: {stage}")
+            step()
+            stages = ["moves", "link", "discover", "finalize", "train"]
+            session["stage"] = stages[stages.index(stage) + 1]
+            save_session(session)
+            torch.cuda.empty_cache()
 
 
 def file_image(root, path, anime_dir, labels, multi):
@@ -679,6 +902,16 @@ def main():
     if not root.is_dir():
         raise SystemExit(f"Folder not found: {root}")
     task = "4" if args.skip_labeling else "2" if args.corrections else args.task
+    resume = False
+    if SESSION_FILE.exists():
+        pending = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+        log(f"Warning: unfinished correction session found for {pending.get('root')} (stopped at stage '{pending.get('stage')}')")
+        if pending.get("root") != str(root):
+            log(f"It belongs to another folder. Run with --target-path \"{pending.get('root')}\" to recover it.")
+        elif input("Recover it now? [Y/n]: ").strip().lower() in ("", "y", "yes"):
+            task, resume = "2", True
+        elif input("Discard it? [y/N]: ").strip().lower() in ("y", "yes"):
+            SESSION_FILE.unlink()
     if task is None:
         print(f"1) Sort unclassed images ({len(unlabeled_images(root))})")
         print("2) Fix wrong category (detect images you moved by hand)")
@@ -690,11 +923,13 @@ def main():
     elif task == "2" and args.corrections:
         label_images(root, apply_corrections(root, parse_corrections(args.corrections.expanduser()), Gallery(None, args.model)), args)
     elif task == "2":
-        fix_drift(root, args.model)
+        run_corrections(root, args, resume)
     elif task == "3":
         label_images(root, suspicious_images(root), args)
     elif task != "4":
         raise SystemExit("Choose 1-4")
+    if not args.no_link and task != "2":
+        link_new_characters(root, args.model)
     if task != "4" and input("Train now? [Y/n]: ").strip().lower() not in ("", "y", "yes"):
         return
     items = [(p, [label]) for p, label in labeled_images(root)]
@@ -702,6 +937,8 @@ def main():
     if len({label for _, group in items for label in group}) < 2:
         raise SystemExit("Need at least 2 characters in <Series>/<Character>/ folders to train")
     train(items, args, pick_device())
+    if task == "2":
+        SESSION_FILE.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

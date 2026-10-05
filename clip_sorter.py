@@ -102,7 +102,9 @@ TRAINED_THRESHOLD = 0.9
 TRAINED_DIR = Path(os.environ["HF_HOME"]) / "finetuned"
 SUS_FILE = Path(os.environ["HF_HOME"]) / "suspicious.json"
 OVERRIDES_FILE = Path(os.environ["HF_HOME"]) / "series_overrides.json"
+ALIASES_FILE = Path(os.environ["HF_HOME"]) / "character_aliases.json"
 INDEX_FILE = ".sorted_index.jsonl"
+SESSION_FILE = Path(os.environ["HF_HOME"]) / "correction_session.json"
 REF_SHORTLIST = 5
 REF_IMAGES = 5
 COLORS = ("aqua", "black", "blonde", "blue", "brown", "green", "grey", "orange", "pink", "purple", "red", "silver", "white", "yellow")
@@ -189,6 +191,17 @@ def describe(tag):
     qualifiers = QUALIFIER.findall(tag)
     name = pretty(legalize(base_name(tag)))
     return f"an illustration of {name} from {pretty(legalize(title_name(qualifiers[-1])))}" if qualifiers else f"an illustration of {name}"
+
+
+def danbooru_find_tags(name, category=4):
+    found = []
+    for pattern in (f"{name}*", f"*{name}*"):
+        params = urlencode({"search[category]": category, "search[name_matches]": pattern, "search[order]": "count", "limit": 10, "only": "name,post_count"})
+        with urlopen(Request(f"{DANBOORU}/tags.json?{params}", headers=DANBOORU_HEADERS), timeout=15) as r:
+            found = [(t["name"], t["post_count"]) for t in json.load(r)]
+        if found:
+            break
+    return found
 
 
 def danbooru_reference_images(tag, count):
@@ -445,6 +458,7 @@ class Tagger:
         self.cache_file = Path(os.environ["HF_HOME"]) / "series_cache.json"
         self.series_cache = json.loads(self.cache_file.read_text(encoding="utf-8")) if self.cache_file.exists() else {}
         self.overrides = load_overrides()
+        self.aliases = load_aliases()
         self.explicit_idx = next(i for i, r in enumerate(rows) if r["category"] == "9" and r["name"] == "explicit")
         general = {r["name"]: i for i, r in enumerate(rows) if r["category"] == "0"}
         self.looks = [[(f"{c}_{part}", general[f"{c}_{part}"]) for c in COLORS if f"{c}_{part}" in general] for part in ("hair", "eyes")]
@@ -460,6 +474,8 @@ class Tagger:
         return self.series_cache[char]
 
     def label(self, char):
+        if char in self.aliases:
+            return tuple(self.aliases[char])
         slug = legalize(base_name(char))
         if slug in self.overrides:
             return self.overrides[slug], slug
@@ -640,10 +656,16 @@ class Gallery:
             found.setdefault(self.labels[j], sim)
         return list(found.items())[:k]
 
-    def match(self, embs, threshold):
+    def match(self, embs, threshold, allowed=None):
         if self.embs is None:
             return [None] * len(embs)
-        sims, idx = (embs @ self.embs.T).topk(min(20, len(self.labels)), dim=-1)
+        all_sims = embs @ self.embs.T
+        if allowed is not None:
+            mask = torch.tensor([l in allowed for l in self.labels])
+            if not mask.any():
+                return [None] * len(embs)
+            all_sims = all_sims.masked_fill(~mask, -1.0)
+        sims, idx = all_sims.topk(min(20, len(self.labels)), dim=-1)
         results = []
         for row_sims, row_idx in zip(sims.tolist(), idx.tolist()):
             best = self.labels[row_idx[0]]
@@ -689,6 +711,15 @@ class Gallery:
     def save(self):
         self.cache_file.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"model": self.model_id, "embs": self.embs, "labels": [list(l) for l in self.labels], "fetched": sorted(self.fetched)}, self.cache_file)
+
+
+def load_aliases():
+    return json.loads(ALIASES_FILE.read_text(encoding="utf-8")) if ALIASES_FILE.exists() else {}
+
+
+def save_aliases(aliases):
+    ALIASES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ALIASES_FILE.write_text(json.dumps(aliases, indent=1, sort_keys=True, ensure_ascii=False), encoding="utf-8")
 
 
 def load_overrides():
@@ -922,6 +953,11 @@ def process_chunk(paths, models, args, output, label, done_file):
 def main():
     args = parse_args()
     ensure_hf_login()
+    if SESSION_FILE.exists():
+        pending = json.loads(SESSION_FILE.read_text(encoding="utf-8"))
+        log(f"Warning: unfinished correction session found for {pending.get('root')} (stopped at stage '{pending.get('stage')}')")
+        if input("Sort anyway? Recover first with clip_sorter_train.py option 2 [y/N]: ").strip().lower() not in ("y", "yes"):
+            raise SystemExit(f'Recover with: python clip_sorter_train.py --target-path "{pending.get("root")}"')
     target, output = resolve_paths(args)
     if args.mode == "learn":
         device = pick_device()

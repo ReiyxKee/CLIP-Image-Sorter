@@ -62,7 +62,9 @@ python clip_sorter_train.py --target-path ./pics_sorted
 
 Menu: `1` sort unclassed images, `2` fix wrong category, `3` resolve suspicious, `4` train only (or `--task 1-4`). Training follows.
 
-Fix wrong category: move misplaced images (or whole character folders) to the right `<Series>/<Character>/` folder yourself, then run option `2`. It compares the folders with `.sorted_index.jsonl` (written by the sorter), relabels the moved images in the gallery, renames them, and remembers series fixes (e.g. Kirito → Sword Art Online) in `models/series_overrides.json` for future sorts. The first run on an older sorted folder only records a baseline.
+Fix wrong category: move misplaced images (or whole character folders) to the right `<Series>/<Character>/` folder yourself, then run option `2`. You can also drop uncategorized images of one series straight into a `<Series>/` folder: option `2` finds the series and its cast on Danbooru and sorts them into character folders, leaving unsure ones for option `1`.
+
+Option `2` runs in stages (moves, link, discover, finalize, train) and records progress in `models/correction_session.json`. If it stops midway, both scripts warn at start and the trainer offers to recover from the last stage. It compares the folders with `.sorted_index.jsonl` (written by the sorter), relabels the moved images in the gallery, renames them, and remembers series fixes (e.g. Kirito → Sword Art Online) in `models/series_overrides.json` for future sorts. The first run on an older sorted folder only records a baseline.
 
 Opens a labeling window for each anime image without a character: fill in character and series (click a suggestion to fix typos, `+ Character` for group images), Save (Enter), Skip (Esc) or Back (Ctrl+Z). It moves the image, then fine-tunes a SigLIP2 copy into `./models/finetuned`. `clip_sorter.py` checks it first.
 
@@ -80,6 +82,8 @@ Unknown Title/Kirito -> Sword Art Online/Kirito
 ```
 
 Corrections also fix the reference gallery, so wrong pictures stop spreading.
+
+New character folders you create are linked to Danbooru before training: the matching tag is found (you pick when unclear), 10 reference pictures go into the gallery, the name joins the fallback pool, and future detections of that tag are filed under your folder names. Unknown characters (e.g. OCs) are learned from your images only. `--no-link` skips this.
 
 Retraining continues from the last trained model, drops characters that no longer have images, and relearns any character touched by a correction from scratch. `--fresh` retrains everything from the original model.
 
