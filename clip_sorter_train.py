@@ -3,14 +3,17 @@ import json
 import os
 import random
 import re
+import queue
 import shutil
+import threading
 import tkinter as tk
 from difflib import get_close_matches
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from clip_sorter import (
-    ANIME, MODEL_ID, QUALIFIER, TRAINED_DIR, Gallery, base_name, collect_images, features, labeled_images,
-    legalize, load_sus, log, original_stem, save_sus, pick_device, pretty, progress, remove_empty_dirs, title_name, transfer_unique,
+    ANIME, FALLBACK_COUNT, MODEL_ID, QUALIFIER, SERIES_COUNT, TAGGER_ID, TRAINED_DIR,
+    Expander, Gallery, Sorter, Tagger, TrainedModel, build_pool, describe, describe_series, base_name, collect_images, features, labeled_images,
+    legalize, load_index, load_overrides, load_sus, log, original_stem, save_index, save_overrides, save_sus, pick_device, pretty, progress, remove_empty_dirs, title_name, transfer_unique,
 )
 
 import torch
@@ -31,6 +34,8 @@ def parse_args():
     p.add_argument("--lr", type=float, default=1e-5)
     p.add_argument("--task", choices=("1", "2", "3", "4"), help="1 sort unclassed, 2 fix wrong category, 3 resolve suspicious, 4 train only")
     p.add_argument("--skip-labeling", action="store_true", help="Same as --task 4")
+    p.add_argument("--fresh", action="store_true", help="Retrain from the original model instead of the last trained copy")
+    p.add_argument("--no-suggest", action="store_true", help="Do not load models for label suggestions")
     p.add_argument("--corrections", type=Path, help="Text file of wrongly sorted characters, see README")
     return p.parse_args()
 
@@ -93,7 +98,7 @@ def apply_corrections(root, corrections, gallery):
             target = anime_dir / pretty(new[0]) / pretty(new[1])
             for p in images:
                 try:
-                    transfer_unique(p, target, "move", f"{new[1]}_{original_stem(p)[:10]}")
+                    reindex(root, p, transfer_unique(p, target, "move", f"{new[1]}_{original_stem(p)[:10]}"))
                 except Exception as e:
                     log(f"Skip {p.name}: {e}")
             log(f"Moved {len(images)} images: {folder.relative_to(root)} -> {target.relative_to(root)}")
@@ -147,6 +152,63 @@ def drop_sus(path):
     save_sus([e for e in load_sus() if e["path"] != str(path)])
 
 
+class Suggester:
+    def __init__(self, model_id):
+        device = pick_device()
+        log(f"Loading suggestion models on {device}...")
+        self.lock = threading.Lock()
+        self.sorter = Sorter(model_id, device)
+        self.tagger = Tagger(TAGGER_ID, device)
+        pool_file = Path(os.environ["HF_HOME"]) / "fallback_characters.pt"
+        count = torch.load(pool_file).get("count", FALLBACK_COUNT) if pool_file.exists() else FALLBACK_COUNT
+        pool = build_pool(self.sorter, model_id, "characters", 4, count, describe)
+        series_pool = build_pool(self.sorter, model_id, "series", 3, SERIES_COUNT if pool else 0, describe_series)
+        self.expander = Expander(self.sorter, model_id, series_pool, pool) if series_pool else None
+        self.pool = (self.expander.pool_tags, self.expander.pool_embs) if self.expander else pool
+        self.gallery = Gallery(self.sorter, model_id)
+        trained_ready = all((TRAINED_DIR / f).exists() for f in ("config.json", "head.safetensors", "labels.json"))
+        self.trained = TrainedModel(TRAINED_DIR, device) if trained_ready else None
+
+    def suggest(self, path):
+        with self.lock:
+            _, embs = self.sorter.embed_images([path], 1)
+            found = {}
+
+            def add(label, score, source):
+                if label[1] and score > found.get(label, (0, ""))[0]:
+                    found[label] = (score, source)
+
+            looks, top_tags = self.tagger.appearance_and_top(path, 3)
+            for tag, score in top_tags:
+                add(self.tagger.label(tag), score, "tagger")
+            if self.trained:
+                for label, score in self.trained.top(path, 3):
+                    add(label, score, "trained")
+            for label, score in self.gallery.top(embs[0], 3):
+                add(label, score, "gallery")
+            shortlist, series = [tag for tag, _ in top_tags], None
+            if self.pool:
+                tags, pool_embs = self.pool
+                conf, idx = self.sorter.probs(embs, pool_embs)[0].topk(5)
+                for score, j in zip(conf.tolist(), idx.tolist()):
+                    add(self.tagger.label(tags[j]), score, "name")
+                    shortlist.append(tags[j])
+            if self.expander:
+                _, series, top = self.expander.resolve(embs, [looks], 0.0, 2.0, self.tagger)[0]
+                shortlist += top
+            self.gallery.fetch_refs(shortlist, self.tagger)
+            for label, score in self.gallery.top(embs[0], 3):
+                add(label, score, "reference")
+            ranked = sorted(found.items(), key=lambda item: -item[1][0])[:6]
+            return [(label, score, source) for label, (score, source) in ranked], series
+
+    def close(self):
+        self.gallery.save()
+        self.tagger.save_cache()
+        if self.expander:
+            self.expander.save()
+
+
 def target_for(path, anime_dir, labels):
     if len(labels) == 1:
         title, slug = labels[0]
@@ -155,9 +217,109 @@ def target_for(path, anime_dir, labels):
     return (anime_dir / pretty(titles.pop()) if len(titles) == 1 else anime_dir), original_stem(path)
 
 
+def label_of_rel(rel):
+    parts = PurePosixPath(rel).parts
+    if ANIME not in parts:
+        return None, None
+    k = parts.index(ANIME)
+    depth = len(parts) - k
+    if depth == 4:
+        return legalize(parts[k + 1]).lower(), legalize(parts[k + 2]).lower()
+    return (legalize(parts[k + 1]).lower(), None) if depth == 3 else (None, None)
+
+
+RETRAIN_FILE = TRAINED_DIR.parent / "retrain_labels.json"
+
+
+def mark_retrain(*labels):
+    marked = {tuple(l) for l in json.loads(RETRAIN_FILE.read_text(encoding="utf-8"))} if RETRAIN_FILE.exists() else set()
+    marked |= {(t, c) for t, c in labels if c}
+    RETRAIN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    RETRAIN_FILE.write_text(json.dumps(sorted(marked)), encoding="utf-8")
+
+
+def reindex(root, old_path, new_path):
+    index = load_index(root)
+    new_rel = new_path.relative_to(root).as_posix()
+    old_rel = old_path.relative_to(root).as_posix()
+    entry = index.pop(old_rel, {"source": ""})
+    title, char = label_of_rel(new_rel)
+    old_label = label_of_rel(old_rel)
+    if old_label[1] and old_label != (title, char):
+        mark_retrain(old_label, (title, char))
+    index[new_rel] = {**entry, "dest": new_rel, "title": title, "char": char}
+    save_index(root, index)
+
+
+def fix_drift(root, model_id):
+    index = load_index(root)
+    current = {p.relative_to(root).as_posix(): p for p in collect_images(root, root)}
+    if not index:
+        for rel in current:
+            title, char = label_of_rel(rel)
+            index[rel] = {"dest": rel, "source": "", "title": title, "char": char}
+        save_index(root, index)
+        log(f"No index yet. Recorded the current layout of {len(index)} images as the baseline; move files to fix them, then run this again.")
+        return
+    unindexed = {}
+    for rel in current:
+        if rel not in index:
+            unindexed.setdefault(PurePosixPath(rel).name, []).append(rel)
+    drifts, missing = [], []
+    for rel, entry in list(index.items()):
+        if rel in current:
+            continue
+        candidates = unindexed.get(PurePosixPath(rel).name, [])
+        if len(candidates) == 1:
+            drifts.append((rel, candidates.pop(), entry))
+        else:
+            missing.append(rel)
+    for rel in missing:
+        index.pop(rel)
+    if missing:
+        log(f"{len(missing)} indexed images were deleted or are ambiguous, dropped from the index")
+    if not drifts:
+        save_index(root, index)
+        log("No moved images found")
+        return
+    log(f"{len(drifts)} moved images found, updating index, gallery and series...")
+    sorter = Sorter(model_id, pick_device())
+    gallery, overrides, sus = Gallery(sorter, model_id), load_overrides(), load_sus()
+    for n, (old, new, entry) in enumerate(drifts, 1):
+        old_label, new_label = (entry.get("title"), entry.get("char")), label_of_rel(new)
+        path = root / new
+        try:
+            if old_label[1] and new_label[1] and old_label[1] != new_label[1] and path.stem.startswith(f"{old_label[1]}_"):
+                path = transfer_unique(path, path.parent, "move", f"{new_label[1]}_{path.stem[len(old_label[1]) + 1:]}")
+                new = path.relative_to(root).as_posix()
+            _, embs = sorter.embed_images([path], 1)
+            if len(embs):
+                gallery.relabel_near(embs[0], new_label if new_label[1] else None)
+                if new_label[1]:
+                    gallery.add(embs, [new_label])
+        except Exception as e:
+            log(f"Skip {new}: {e}")
+            continue
+        if old_label[1] and old_label[1] == new_label[1] and new_label[0] and (old_label[0] or "").lower() != new_label[0]:
+            overrides[new_label[1]] = new_label[0]
+        index.pop(old, None)
+        index[new] = {**entry, "dest": new, "title": new_label[0], "char": new_label[1]}
+        if label_of_rel(old)[1] and label_of_rel(old) != new_label:
+            mark_retrain(label_of_rel(old), new_label)
+        sus = [e for e in sus if e["path"] != str(root / old)]
+        log(f"[{n}/{len(drifts)}] {old} -> {new}")
+    save_index(root, index)
+    save_overrides(overrides)
+    save_sus(sus)
+    gallery.save()
+    remove_empty_dirs(root)
+    log(f"Fixed {len(drifts)} images. Series corrections on file: {len(overrides)}")
+
+
 def file_image(root, path, anime_dir, labels, multi):
     target, stem = target_for(path, anime_dir, labels)
     dest = transfer_unique(path, target, "move", stem)
+    reindex(root, path, dest)
     multi.pop(path.relative_to(root).as_posix(), None)
     if len(labels) > 1:
         multi[dest.relative_to(root).as_posix()] = [list(l) for l in labels]
@@ -170,8 +332,9 @@ def to_slugs(char, series):
 
 
 class LabelApp:
-    def __init__(self, root, items):
-        self.root, self.items, self.index = root, items, 0
+    def __init__(self, root, items, suggester):
+        self.root, self.items, self.index, self.suggester = root, items, 0, suggester
+        self.results = queue.Queue()
         self.series_known, self.chars_known = known_names(root)
         self.all_chars = set().union(*self.chars_known.values()) if self.chars_known else set()
         self.multi, self.history, self.rows, self.last_series = load_multi(root), [], [], ""
@@ -185,6 +348,8 @@ class LabelApp:
         self.info.pack(fill="x")
         self.choices = tk.Frame(panel)
         self.choices.pack(fill="x")
+        self.suggestions = tk.Frame(panel)
+        self.suggestions.pack(fill="x", pady=4)
         self.rows_frame = tk.Frame(panel)
         self.rows_frame.pack(fill="x", pady=8)
         tk.Button(panel, text="+ Character", command=self.add_row).pack(anchor="w")
@@ -200,7 +365,45 @@ class LabelApp:
         self.win.bind("<Escape>", lambda e: self.skip())
         self.win.bind("<Control-z>", lambda e: self.back())
         self.show()
+        self.win.after(200, self.poll_suggestions)
         self.win.mainloop()
+
+    def request_suggestions(self, path):
+        for widget in self.suggestions.winfo_children():
+            widget.destroy()
+        if not self.suggester:
+            return
+        tk.Label(self.suggestions, text="Looking up suggestions...", fg="gray").pack(anchor="w")
+        token = self.index
+
+        def work():
+            try:
+                self.results.put((token, self.suggester.suggest(path)))
+            except Exception as e:
+                self.results.put((token, e))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def poll_suggestions(self):
+        while not self.results.empty():
+            token, result = self.results.get()
+            if token == self.index:
+                self.show_suggestions(result)
+        self.win.after(200, self.poll_suggestions)
+
+    def show_suggestions(self, result):
+        for widget in self.suggestions.winfo_children():
+            widget.destroy()
+        if isinstance(result, Exception):
+            tk.Label(self.suggestions, text=f"Suggestions failed: {result}", fg="gray", wraplength=380, justify="left").pack(anchor="w")
+            return
+        found, series = result
+        tk.Label(self.suggestions, text="Suggestions:" + (f"  (series guess: {pretty(series)})" if series else "")).pack(anchor="w")
+        if not found:
+            tk.Label(self.suggestions, text="none", fg="gray").pack(anchor="w")
+        for (title, slug), score, source in found:
+            tk.Button(self.suggestions, text=f"{pretty(slug)} ({pretty(title)})  {source} {score:.2f}",
+                      command=lambda t=title, c=slug: self.use_choice(t, c)).pack(anchor="w")
 
     def current(self):
         return self.items[self.index]
@@ -233,6 +436,7 @@ class LabelApp:
                     tk.Button(self.choices, text=f"{name}: {pretty(slug) if slug else '?'} ({pretty(title) if title else '?'})",
                               command=lambda t=title, c=slug: self.use_choice(t, c)).pack(anchor="w")
         self.add_row(current, series_folder or self.last_series)
+        self.request_suggestions(path)
 
     def use_choice(self, title, slug):
         row = self.rows[0]
@@ -351,6 +555,7 @@ class LabelApp:
             original.parent.mkdir(parents=True, exist_ok=True)
             if original != dest:
                 shutil.move(dest, original)
+                reindex(self.root, dest, original)
             self.multi.pop(dest.relative_to(self.root).as_posix(), None)
             save_multi(self.root, self.multi)
             if entry:
@@ -363,10 +568,15 @@ class LabelApp:
         self.show()
 
 
-def label_images(root, items):
+def label_images(root, items, args):
     log(f"{len(items)} images to label, opening labeling window...")
     if items:
-        LabelApp(root, items)
+        suggester = None if args.no_suggest else Suggester(args.model)
+        LabelApp(root, items, suggester)
+        if suggester:
+            suggester.close()
+            del suggester
+            torch.cuda.empty_cache()
     remove_empty_dirs(root)
 
 
@@ -379,7 +589,7 @@ def load_image(path, augment):
 
 
 def train(items, args, device):
-    resume = (TRAINED_DIR / "head.safetensors").exists()
+    resume = (TRAINED_DIR / "head.safetensors").exists() and not args.fresh
     source = TRAINED_DIR if resume else args.model
     log(f"Loading {source} on {device}...")
     model = AutoModel.from_pretrained(source).to(device)
@@ -388,12 +598,15 @@ def train(items, args, device):
     labels = sorted({label for _, group in items for label in group})
     index = {label: i for i, label in enumerate(labels)}
     head = torch.nn.Linear(model.config.vision_config.hidden_size, len(labels)).to(device)
+    reset = {tuple(l) for l in json.loads(RETRAIN_FILE.read_text(encoding="utf-8"))} if RETRAIN_FILE.exists() else set()
     if resume:
         old = load_file(TRAINED_DIR / "head.safetensors")
         old_labels = [tuple(l) for l in json.loads((TRAINED_DIR / "labels.json").read_text(encoding="utf-8"))]
+        dropped = len(set(old_labels) - set(index))
+        log(f"Continuing from last trained model: {dropped} characters dropped, {len(reset & set(index))} corrected characters relearned from scratch")
         with torch.no_grad():
             for j, label in enumerate(old_labels):
-                if label in index:
+                if label in index and label not in reset:
                     head.weight[index[label]] = old["weight"][j].to(device)
                     head.bias[index[label]] = old["bias"][j].to(device)
 
@@ -456,6 +669,7 @@ def save_trained(model, processor, head, labels):
     del model
     shutil.rmtree(TRAINED_DIR, ignore_errors=True)
     staging.rename(TRAINED_DIR)
+    RETRAIN_FILE.unlink(missing_ok=True)
     log(f"Saved trained model to {TRAINED_DIR}")
 
 
@@ -467,17 +681,18 @@ def main():
     task = "4" if args.skip_labeling else "2" if args.corrections else args.task
     if task is None:
         print(f"1) Sort unclassed images ({len(unlabeled_images(root))})")
-        print("2) Fix wrong category (corrections file)")
+        print("2) Fix wrong category (detect images you moved by hand)")
         print(f"3) Resolve suspicious ({len(suspicious_images(root))})")
         print("4) Train only")
         task = input("Choose [1-4]: ").strip()
     if task == "1":
-        label_images(root, unlabeled_images(root))
+        label_images(root, unlabeled_images(root), args)
+    elif task == "2" and args.corrections:
+        label_images(root, apply_corrections(root, parse_corrections(args.corrections.expanduser()), Gallery(None, args.model)), args)
     elif task == "2":
-        corrections_file = args.corrections or Path(input("Corrections file: ").strip().strip("'\""))
-        label_images(root, apply_corrections(root, parse_corrections(corrections_file.expanduser()), Gallery(None, args.model)))
+        fix_drift(root, args.model)
     elif task == "3":
-        label_images(root, suspicious_images(root))
+        label_images(root, suspicious_images(root), args)
     elif task != "4":
         raise SystemExit("Choose 1-4")
     if task != "4" and input("Train now? [Y/n]: ").strip().lower() not in ("", "y", "yes"):

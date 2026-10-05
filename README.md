@@ -58,9 +58,13 @@ Series names come from Danbooru and are cached in `./models`.
 python clip_sorter_train.py --target-path ./pics_sorted
 ```
 
-Menu: `1` sort unclassed images, `2` fix wrong category (corrections file), `3` resolve suspicious, `4` train only (or `--task 1-4`). Training follows.
+Menu: `1` sort unclassed images, `2` fix wrong category, `3` resolve suspicious, `4` train only (or `--task 1-4`). Training follows.
+
+Fix wrong category: move misplaced images (or whole character folders) to the right `<Series>/<Character>/` folder yourself, then run option `2`. It compares the folders with `.sorted_index.jsonl` (written by the sorter), relabels the moved images in the gallery, renames them, and remembers series fixes (e.g. Kirito → Sword Art Online) in `models/series_overrides.json` for future sorts. The first run on an older sorted folder only records a baseline.
 
 Opens a labeling window for each anime image without a character: fill in character and series (click a suggestion to fix typos, `+ Character` for group images), Save (Enter), Skip (Esc) or Back (Ctrl+Z). It moves the image, then fine-tunes a SigLIP2 copy into `./models/finetuned`. `clip_sorter.py` checks it first.
+
+Each image gets clickable suggestions from the tagger, your trained model, the gallery, the name pool, and Danbooru (series guess + reference pictures), loaded in the background. `--no-suggest` turns them off.
 
 For images with several characters, enter them comma separated (`alsace, taihou`) and give each a series. They are filed like the sorter does (same series → series folder, mixed → `Anime_Handdrawn` root) and remembered in `.multi_labels.json` for training.
 
@@ -74,6 +78,8 @@ Unknown Title/Kirito -> Sword Art Online/Kirito
 ```
 
 Corrections also fix the reference gallery, so wrong pictures stop spreading.
+
+Retraining continues from the last trained model, drops characters that no longer have images, and relearns any character touched by a correction from scratch. `--fresh` retrains everything from the original model.
 
 Ctrl+C during training stops early and still saves what was learned.
 

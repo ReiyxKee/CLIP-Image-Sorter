@@ -92,16 +92,20 @@ QUALIFIER = re.compile(r"\(([^()]*)\)")
 FALLBACK_COUNT = 20000
 SERIES_COUNT = 5000
 EXPAND_LIMIT = 100
-EXPAND_THRESHOLD = 0.7
+EXPAND_THRESHOLD = 0.9
+SERIES_THRESHOLD = 0.5
 APPEARANCE_THRESHOLD = 0.35
-GALLERY_THRESHOLD = 0.85
+GALLERY_THRESHOLD = 0.9
+GALLERY_MARGIN = 0.03
 TRAINED_THRESHOLD = 0.9
 TRAINED_DIR = Path(os.environ["HF_HOME"]) / "finetuned"
 SUS_FILE = Path(os.environ["HF_HOME"]) / "suspicious.json"
+OVERRIDES_FILE = Path(os.environ["HF_HOME"]) / "series_overrides.json"
+INDEX_FILE = ".sorted_index.jsonl"
 REF_SHORTLIST = 5
 REF_IMAGES = 5
 COLORS = ("aqua", "black", "blonde", "blue", "brown", "green", "grey", "orange", "pink", "purple", "red", "silver", "white", "yellow")
-FALLBACK_THRESHOLD = 0.5
+FALLBACK_THRESHOLD = 0.85
 
 CATEGORY_PROMPTS = {
     REAL: [
@@ -273,7 +277,7 @@ def parse_args():
     p.add_argument("--gallery-threshold", type=float, help="Reference picture match cutoff 0-1, higher = stricter, -1 disables")
     p.add_argument("--mode", choices=("copy", "move", "recategorize", "learn"), help="Copy (default), move, re-sort an output folder in place, or learn from a sorted folder")
     p.add_argument("--category-threshold", type=float, default=0.45)
-    p.add_argument("--character-threshold", type=float, default=0.85)
+    p.add_argument("--character-threshold", type=float, default=0.9)
     p.add_argument("--nsfw-threshold", type=float, help="R18 cutoff 0-1, higher flags fewer images, -1 disables")
     return p.parse_args()
 
@@ -413,6 +417,7 @@ class Tagger:
         self.char_names = [rows[i]["name"] for i in self.char_idx.tolist()]
         self.cache_file = Path(os.environ["HF_HOME"]) / "series_cache.json"
         self.series_cache = json.loads(self.cache_file.read_text(encoding="utf-8")) if self.cache_file.exists() else {}
+        self.overrides = load_overrides()
         self.explicit_idx = next(i for i, r in enumerate(rows) if r["category"] == "9" and r["name"] == "explicit")
         general = {r["name"]: i for i, r in enumerate(rows) if r["category"] == "0"}
         self.looks = [[(f"{c}_{part}", general[f"{c}_{part}"]) for c in COLORS if f"{c}_{part}" in general] for part in ("hair", "eyes")]
@@ -428,9 +433,12 @@ class Tagger:
         return self.series_cache[char]
 
     def label(self, char):
+        slug = legalize(base_name(char))
+        if slug in self.overrides:
+            return self.overrides[slug], slug
         qualifiers = QUALIFIER.findall(char)
         series = self.series(char) or (qualifiers[-1] if qualifiers else None)
-        return legalize(title_name(series)) if series else UNKNOWN_TITLE, legalize(base_name(char))
+        return legalize(title_name(series)) if series else UNKNOWN_TITLE, slug
 
     def save_cache(self):
         self.cache_file.parent.mkdir(parents=True, exist_ok=True)
@@ -444,11 +452,23 @@ class Tagger:
         return canvas
 
     @torch.no_grad()
+    def probabilities(self, paths):
+        batch = torch.stack([self.transform(self.pad_square(Image.open(p).convert("RGB"))) for p in paths])
+        return self.model(batch[:, [2, 1, 0]].to(self.device)).sigmoid().cpu()
+
+    @torch.no_grad()
+    def appearance_and_top(self, path, k):
+        row = self.probabilities([path])[0]
+        best = [max(group, key=lambda t: row[t[1]]) for group in self.looks if group]
+        looks = [name for name, idx in best if row[idx] >= APPEARANCE_THRESHOLD]
+        conf, idx = row[self.char_idx].topk(k)
+        return looks, [(self.char_names[j], c) for c, j in zip(conf.tolist(), idx.tolist())]
+
+    @torch.no_grad()
     def tag(self, paths, batch_size, threshold, r18_threshold):
         labels, r18, appearance, multi = [], [], [], []
         for i in range(0, len(paths), batch_size):
-            batch = torch.stack([self.transform(self.pad_square(Image.open(p).convert("RGB"))) for p in paths[i:i + batch_size]])
-            probs = self.model(batch[:, [2, 1, 0]].to(self.device)).sigmoid().cpu()
+            probs = self.probabilities(paths[i:i + batch_size])
             for row in probs[:, self.char_idx]:
                 hits = sorted((row >= threshold).nonzero().flatten().tolist(), key=lambda j: -row[j])
                 found = {}
@@ -584,11 +604,26 @@ class Gallery:
             self.embs = embs if self.embs is None else torch.cat([self.embs, embs])
             self.labels += labels
 
+    def top(self, emb, k):
+        if self.embs is None:
+            return []
+        sims, idx = (self.embs @ emb).topk(min(50, len(self.labels)))
+        found = {}
+        for sim, j in zip(sims.tolist(), idx.tolist()):
+            found.setdefault(self.labels[j], sim)
+        return list(found.items())[:k]
+
     def match(self, embs, threshold):
         if self.embs is None:
             return [None] * len(embs)
-        sims, idx = (embs @ self.embs.T).max(dim=-1)
-        return [(self.labels[j], s) if s >= threshold else None for s, j in zip(sims.tolist(), idx.tolist())]
+        sims, idx = (embs @ self.embs.T).topk(min(20, len(self.labels)), dim=-1)
+        results = []
+        for row_sims, row_idx in zip(sims.tolist(), idx.tolist()):
+            best = self.labels[row_idx[0]]
+            rival = next((s for s, j in zip(row_sims, row_idx) if self.labels[j] != best), 0.0)
+            ok = row_sims[0] >= threshold and row_sims[0] - rival >= GALLERY_MARGIN
+            results.append((best, row_sims[0]) if ok else None)
+        return results
 
     def fetch_refs(self, tags, tagger):
         new = [t for t in dict.fromkeys(tags) if t not in self.fetched]
@@ -600,6 +635,18 @@ class Gallery:
             self.fetched.add(tag)
             if images:
                 self.add(self.sorter.embed_pil(images), [tagger.label(tag)] * len(images))
+
+    def relabel_near(self, emb, new):
+        if self.embs is None:
+            return 0
+        hits = ((self.embs @ emb) >= 0.995).tolist()
+        if new:
+            self.labels = [new if h else l for l, h in zip(self.labels, hits)]
+        elif any(hits):
+            keep = [not h for h in hits]
+            self.embs = self.embs[torch.tensor(keep)] if any(keep) else None
+            self.labels = [l for l, k in zip(self.labels, keep) if k]
+        return sum(hits)
 
     def relabel(self, old, new):
         old = (old[0].lower(), old[1].lower())
@@ -615,6 +662,42 @@ class Gallery:
     def save(self):
         self.cache_file.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"model": self.model_id, "embs": self.embs, "labels": [list(l) for l in self.labels], "fetched": sorted(self.fetched)}, self.cache_file)
+
+
+def load_overrides():
+    return json.loads(OVERRIDES_FILE.read_text(encoding="utf-8")) if OVERRIDES_FILE.exists() else {}
+
+
+def save_overrides(overrides):
+    OVERRIDES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    OVERRIDES_FILE.write_text(json.dumps(overrides, indent=1, sort_keys=True, ensure_ascii=False), encoding="utf-8")
+
+
+def load_index(root):
+    index, path = {}, root / INDEX_FILE
+    if not path.exists():
+        return index
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        source = Path(entry.get("source") or "")
+        if root in source.parents:
+            index.pop(source.relative_to(root).as_posix(), None)
+        index[entry["dest"]] = entry
+    return index
+
+
+def save_index(root, index):
+    lines = (json.dumps(e, ensure_ascii=False) for e in index.values())
+    (root / INDEX_FILE).write_text("".join(f"{line}\n" for line in lines), encoding="utf-8")
+
+
+def append_index(root, dest, source, label):
+    entry = {"dest": dest.relative_to(root).as_posix(), "source": str(source), "title": label[0], "char": label[1]}
+    with (root / INDEX_FILE).open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def load_sus():
@@ -662,6 +745,13 @@ class TrainedModel:
         head = load_file(path / "head.safetensors")
         self.weight, self.bias = head["weight"].to(device), head["bias"].to(device)
         self.labels = [tuple(l) for l in json.loads((path / "labels.json").read_text(encoding="utf-8"))]
+
+    @torch.no_grad()
+    def top(self, path, k):
+        inputs = self.processor(images=[Image.open(path).convert("RGB")], return_tensors="pt").to(self.device)
+        probs = (features(self.model.get_image_features(**inputs)) @ self.weight.T + self.bias).softmax(dim=-1)[0]
+        conf, idx = probs.topk(min(k, len(self.labels)))
+        return [(self.labels[j], c) for c, j in zip(conf.tolist(), idx.tolist())]
 
     @torch.no_grad()
     def predict(self, paths, batch_size):
@@ -720,7 +810,7 @@ def resolve_unknown(unknown, embs, appearance, characters, sources, models, args
 
     unknown = [i for i in unknown if i not in confident]
     if expander and unknown:
-        found = expander.resolve(embs[unknown], [appearance[i] for i in unknown], args.fallback_threshold, args.expand_threshold, tagger)
+        found = expander.resolve(embs[unknown], [appearance[i] for i in unknown], SERIES_THRESHOLD, args.expand_threshold, tagger)
         for i, (_, series, top) in zip(unknown, found):
             shortlist[i] += top
             if series:
@@ -787,6 +877,7 @@ def process_chunk(paths, models, args, output, label, done_file):
             original = original_stem(path) if args.mode == "recategorize" else path.stem
             stem = f"{char}_{original[:10]}" if char else original
             dest = transfer_unique(path, dest, args.mode, stem)
+            append_index(output, dest, path, (title, char))
             if done_file:
                 with done_file.open("a", encoding="utf-8") as f:
                     f.write(f"{path}\n")
