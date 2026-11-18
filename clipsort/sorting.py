@@ -1,5 +1,5 @@
 """Per-chunk sorting flow."""
-from .config import ANIME, CATEGORY_PROMPTS, R18, REAL, REALISTIC_REAL_PROB, REF_SHORTLIST, SERIES_THRESHOLD, SUS_FILE, UNKNOWN_TITLE
+from .config import CATEGORY_PROMPTS, FOLDERS, R18, REALISTIC_REAL_PROB, REF_SHORTLIST, SERIES_THRESHOLD, SUS_FILE, UNKNOWN_TITLE
 from .files import sorted_stem, transfer_unique
 from .logs import log
 from .names import pretty
@@ -71,14 +71,14 @@ def process_chunk(paths, models, args, output, label, done_file, deduper=None):
 
     r18 = detect_nsfw(nsfw, paths, args.batch_size, args.nsfw_threshold) if nsfw else [False] * len(paths)
     names = list(CATEGORY_PROMPTS)
-    real_i, anime_i = names.index(REAL), names.index(ANIME)
+    real_i, anime_i = names.index("real"), names.index("anime")
     for i in (i for i, flag in enumerate(r18) if flag):
-        categories[i] = ANIME if probs[i, anime_i] > probs[i, real_i] else REAL
+        categories[i] = "anime" if probs[i, anime_i] > probs[i, real_i] else "real"
 
     characters = [(None, None)] * len(paths)
     sources = [""] * len(paths)
     suspicious = {}
-    anime = [i for i, c in enumerate(categories) if c == ANIME]
+    anime = [i for i, c in enumerate(categories) if c == "anime"]
     if anime:
         labels, flags, looks, multi, realism = tagger.tag([paths[i] for i in anime], args.batch_size, args.character_threshold, args.nsfw_threshold)
         appearance = dict(zip(anime, looks))
@@ -89,7 +89,7 @@ def process_chunk(paths, models, args, output, label, done_file, deduper=None):
             # keeps realistic paintings in anime.
             photo = probs[i, real_i].item()
             if args.realistic_threshold >= 0 and real_score >= args.realistic_threshold and photo >= REALISTIC_REAL_PROB:
-                categories[i], sources[i] = REAL, f"tagger realistic {real_score:.2f}, photo {photo:.2f}"
+                categories[i], sources[i] = "real", f"tagger realistic {real_score:.2f}, photo {photo:.2f}"
                 photos.add(i)
         for i, char, flag in zip(anime, labels, flags):
             r18[i] = r18[i] or (flag and nsfw is not None)
@@ -120,7 +120,7 @@ def process_chunk(paths, models, args, output, label, done_file, deduper=None):
     sus_entries = load_sus() if suspicious else []
     for n, (path, cat, conf, (title, char), flag, src) in enumerate(zip(paths, categories, confs, characters, r18, sources), 1):
         try:
-            dest = ((output / R18 if flag else output) / cat).joinpath(*(pretty(x) for x in (title, char) if x))
+            dest = ((output / R18 if flag else output) / FOLDERS[cat]).joinpath(*(pretty(x) for x in (title, char) if x))
             dest = transfer_unique(path, dest, args.mode, sorted_stem(path, char, args.mode == "recategorize"))
             append_index(output, dest, path, (title, char))
             if deduper:

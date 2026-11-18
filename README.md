@@ -52,6 +52,8 @@ pics_sorted/
 
 Change the names in `[folders]` (e.g. `anime = Handdrawn`, `real = Real Photo`). Each sorted folder remembers the names it was sorted with (`.folder_names.json`); on the next sorter or trainer run the old folders are listed and, after you confirm, renamed, and the records that store sorted paths (`.sorted_index.jsonl`, `.multi_labels.json`, `models/suspicious.json`) are rewritten so the trainer does not mistake the rename for hand-moved images. It refuses when a target folder already exists or a correction session is unfinished.
 
+`real`, `non_human` and `uncategorizable` may share a folder (e.g. `non_human = Others` and `uncategorizable = Others`); renaming two of them to one name merges their folders, refused if a file name would clash. A shared folder cannot be split again by renaming, since the images are not marked by category: re-sort it with `mode = recategorize`. `anime` and `r18` must keep names of their own.
+
 ### Duplicates
 
 `dedupe = exact` sends copies with identical content to `duplicates_path` (empty = `<output>/duplicates`); `dedupe = similar` also catches the same picture resized or re-encoded (`similar_distance`, 0-64, default 4). New images are compared with everything already in the output folder and earlier in the run, and the first copy is kept. Duplicates are copied in `copy` mode (your input is untouched) and moved otherwise; `duplicates.txt` in that folder says what each one duplicates. Hashes of the output folder are cached in `.dedupe_index.json`, and the duplicates folder is skipped by `recategorize` and the trainer (it holds a `.clip_ignore` marker; any folder with one is skipped).

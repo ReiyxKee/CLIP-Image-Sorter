@@ -47,6 +47,7 @@ real = Real_Photograph
 # parent folder for adult images (holds its own anime/real folders), see [sorter] r18
 r18 = R18
 non_human = Non_Human
+# real, non_human and uncategorizable may use the same name to share one folder
 uncategorizable = Uncategorizable
 
 [files]
@@ -210,9 +211,11 @@ def _folders():
             raise SystemExit(f'{CONFIG_FILE}: [folders] {key} = "{name}" is not a usable folder name '
                              '(no < > : " / \\ | ? *, no leading/trailing spaces, no trailing dot)')
         names[key] = name
-    lowered = [n.lower() for n in names.values()]
-    if len(set(lowered)) != len(lowered):
-        raise SystemExit(f"{CONFIG_FILE}: [folders] names must all be different: {names}")
+    # real / non_human / uncategorizable may share a folder; anime and r18 must stand alone
+    # (the trainer finds characters by the anime folder, and r18 holds its own category folders)
+    for key in ("anime", "r18"):
+        if any(other != key and n.lower() == names[key].lower() for other, n in names.items()):
+            raise SystemExit(f'{CONFIG_FILE}: [folders] {key} = "{names[key]}" must not be shared with another folder')
     return names
 
 

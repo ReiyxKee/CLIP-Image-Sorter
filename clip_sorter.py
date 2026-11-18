@@ -228,7 +228,10 @@ def main():
 
     if recategorize:
         remove_empty_dirs(output)
-    log(f"Done. Summary: {dict(totals)}, {R18}: {r18_total}")
+    summary = Counter()
+    for key, n in totals.items():
+        summary[FOLDERS.get(key, key)] += n
+    log(f"Done. Summary: {dict(summary)}, {R18}: {r18_total}")
 
 
 if __name__ == "__main__":

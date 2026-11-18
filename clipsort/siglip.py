@@ -5,7 +5,7 @@ from PIL import Image
 from transformers import AutoModel
 from transformers import AutoProcessor
 
-from .config import CATEGORY_PROMPTS, UNCATEGORIZABLE
+from .config import CATEGORY_PROMPTS
 from .logs import log, progress
 
 
@@ -66,5 +66,5 @@ def classify_categories(sorter, embs, class_embs, threshold):
     names = list(CATEGORY_PROMPTS)
     probs = sorter.probs(embs, class_embs)
     conf, idx = probs.max(dim=-1)
-    categories = [names[i] if c >= threshold else UNCATEGORIZABLE for c, i in zip(conf.tolist(), idx.tolist())]
+    categories = [names[i] if c >= threshold else "uncategorizable" for c, i in zip(conf.tolist(), idx.tolist())]
     return categories, conf.tolist(), probs

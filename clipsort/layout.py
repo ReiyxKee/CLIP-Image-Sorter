@@ -64,8 +64,9 @@ def same_dir(a, b):
 
 
 def plan_renames(root, old, new):
-    """Renames in run order, R18 parent first: (path now, path when its turn comes, new path)."""
-    plan = []
+    """Folder moves in run order, R18 parent first: (path now, path when its turn comes, new path).
+    Several categories can end up in one folder; the later ones are then merged into it."""
+    plan, seen = [], set()
     r18_old, r18_new = root / old["r18"], root / new["r18"]
     if old["r18"] != new["r18"] and r18_old.is_dir():
         plan.append((r18_old, r18_old, r18_new))
@@ -74,9 +75,49 @@ def plan_renames(root, old, new):
             continue
         for parent_now, parent_then in ((root, root), (r18_old, r18_new)):
             src = parent_now / old[key]
-            if src.is_dir():
+            if src.is_dir() and (src, new[key]) not in seen:
+                seen.add((src, new[key]))
                 plan.append((src, parent_then / old[key], parent_then / new[key]))
     return plan
+
+
+def split_folders(old, new):
+    """Old folders shared by categories that now go to different folders (cannot be told apart)."""
+    by_old = {}
+    for key in CATEGORY_KEYS:
+        by_old.setdefault(old[key], set()).add(new[key])
+    return [name for name, targets in by_old.items() if len(targets) > 1]
+
+
+def merge_problems(root, plan, old, new):
+    """Targets that exist but are not part of the layout, and file names that would clash in a merge."""
+    keeps = {(k, new[k]) for k in CATEGORY_KEYS if old[k] == new[k]}
+    problems, groups = [], {}
+    for src, _, dst in plan:
+        groups.setdefault(dst, []).append(src)
+    for dst, srcs in groups.items():
+        is_category = dst.parent in (root, root / new["r18"]) and any(k for k, n in keeps if n == dst.name)
+        if dst.exists() and not any(same_dir(s, dst) for s in srcs) and not is_category:
+            problems.append(f"{dst} already exists")
+            continue
+        names = {}
+        sources = ([dst] if dst.exists() and not any(same_dir(s, dst) for s in srcs) else []) + srcs
+        for folder in sources:
+            for child in folder.iterdir():
+                other = names.setdefault(child.name.lower(), folder)
+                if other != folder:
+                    problems.append(f"{child.name} is in both {other.relative_to(root)} and {folder.relative_to(root)}")
+    return problems
+
+
+def move_into(src, dst):
+    """Rename src to dst, or move its contents into dst when dst already exists (a merge)."""
+    if not dst.exists() or same_dir(src, dst):
+        src.rename(dst)
+        return
+    for child in list(src.iterdir()):
+        child.rename(dst / child.name)
+    src.rmdir()
 
 
 def rewrite_records(root, old, new):
@@ -118,20 +159,24 @@ def check_layout(root, ask=True):
     if not plan:
         save_layout(root)
         return
-    log(f"Folder names in {CONFIG_FILE.name} changed: " + ", ".join(f"{a} -> {b}" for a, b in changes.values()))
+    log(f"Folder names in {CONFIG_FILE.name} changed: " + ", ".join(sorted({f"{a} -> {b}" for a, b in changes.values()})))
     if SESSION_FILE.exists() and json.loads(SESSION_FILE.read_text(encoding="utf-8")).get("root") == str(root):
         raise SystemExit("An unfinished correction session uses the old names. Put the old names back in "
                          f"{CONFIG_FILE.name} [folders], finish it with clip_sorter_train.py option 2, then change them again.")
-    conflicts = [dst for src, _, dst in plan if dst.exists() and not same_dir(src, dst)]
-    if conflicts:
-        raise SystemExit("Cannot rename, these folders already exist (merge or remove them first):\n  "
-                         + "\n  ".join(str(c) for c in conflicts))
+    split = split_folders(old, FOLDERS)
+    if split:
+        raise SystemExit(f"Cannot split the shared folder(s) {', '.join(split)} into separate ones by renaming: "
+                         "the images are not marked by category. Keep them shared, or re-sort with mode = recategorize.")
+    problems = merge_problems(root, plan, old, FOLDERS)
+    if problems:
+        raise SystemExit("Cannot rename (nothing was changed):\n  " + "\n  ".join(problems[:20])
+                         + (f"\n  ...and {len(problems) - 20} more" if len(problems) > 20 else ""))
     for src, _, dst in plan:
-        log(f"  {src.relative_to(root)}  ->  {dst.relative_to(root)}")
+        log(f"  {src.relative_to(root)}  ->  {dst.relative_to(root)}{'  (merge)' if dst.exists() and not same_dir(src, dst) else ''}")
     if ask and input(f"Rename these {len(plan)} folders in {root}? [Y/n]: ").strip().lower() not in ("", "y", "yes"):
         raise SystemExit(f"Not renamed. Put the old names back in {CONFIG_FILE} [folders] to keep using this folder.")
     for _, src, dst in plan:
-        src.rename(dst)
+        move_into(src, dst)
     rewrite_records(root, old, FOLDERS)
     save_layout(root)
     log(f"Renamed {len(plan)} folders and updated the sorted records")

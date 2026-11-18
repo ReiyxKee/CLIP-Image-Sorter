@@ -56,8 +56,9 @@ FALLBACK_THRESHOLD = 0.85
 REALISTIC_TAGS = ("realistic", "photorealistic")
 REALISTIC_THRESHOLD = 0.5
 REALISTIC_REAL_PROB = 0.15
+# keyed by category, not folder name: several categories may share one folder
 CATEGORY_PROMPTS = {
-    REAL: [
+    "real": [
         "a real photograph of a person taken with a camera",
         "a candid photo of a real human",
         "a professional portrait photograph of a real person",
@@ -66,7 +67,7 @@ CATEGORY_PROMPTS = {
         "a realistic photo with natural skin texture and real lighting",
         "a film still of a real actor",
     ],
-    ANIME: [
+    "anime": [
         "an anime illustration of a character",
         "a manga drawing of a character",
         "a hand-drawn sketch of a person",
@@ -77,7 +78,7 @@ CATEGORY_PROMPTS = {
         "fan art of a fictional character",
         "a watercolor or pencil drawing of a person",
     ],
-    NON_HUMAN: [
+    "non_human": [
         "a photo of an animal",
         "a photo of a landscape with no people",
         "a photo of a building or city with no people",
@@ -87,7 +88,7 @@ CATEGORY_PROMPTS = {
         "a drawing of scenery with no characters",
         "an illustration of an animal or creature",
     ],
-    UNCATEGORIZABLE: [
+    "uncategorizable": [
         "a screenshot of text or a document",
         "a screenshot of a user interface",
         "an abstract pattern or texture",
