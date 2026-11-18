@@ -1,9 +1,10 @@
 """Fallback character pool and series-guided search."""
 import os
+import time
 import torch
 from pathlib import Path
 
-from .config import EXPAND_LIMIT, REF_SHORTLIST
+from .config import EXPAND_LIMIT, POOL_MAX_AGE_DAYS, POOL_MIN_POSTS, REF_SHORTLIST
 from .danbooru import danbooru_related, danbooru_top_tags
 from .logs import log, progress
 from .names import describe, legalize, title_name
@@ -13,27 +14,34 @@ def build_pool(sorter, model_id, name, category, count, describe_fn):
     if count <= 0:
         return None
     cache_file = Path(os.environ["HF_HOME"]) / f"fallback_{name}.pt"
-    if cache_file.exists():
-        cache = torch.load(cache_file)
-        if cache["model"] == model_id and cache.get("count") == count:
-            return cache["tags"], cache["embs"]
-    log(f"Fetching top {count} Danbooru {name}...")
+    cache = torch.load(cache_file) if cache_file.exists() else None
+    if cache and cache["model"] != model_id:
+        cache = None
+    fresh = cache and cache.get("count") == count and time.time() - cache.get("time", 0) < POOL_MAX_AGE_DAYS * 86400
+    if fresh:
+        return cache["tags"], cache["embs"]
+    log(f"Fetching top {count} Danbooru {name} (refreshes every {POOL_MAX_AGE_DAYS} days so new characters show up)...")
     try:
-        tags = danbooru_top_tags(category, count, f"Fetching Danbooru {name} pages")
+        tags = danbooru_top_tags(category, count, f"Fetching Danbooru {name} pages", POOL_MIN_POSTS)
     except Exception as e:
+        if cache:
+            log(f"Danbooru {name} fetch failed, using the older cached list: {e}")
+            return cache["tags"], cache["embs"]
         log(f"Danbooru {name} fetch failed, skipping: {e}")
         return None
     unique = {}
     for tag in tags:
         unique.setdefault(describe_fn(tag), tag)
     prompts, tags = list(unique), list(unique.values())
-    embs = []
-    for i in range(0, len(prompts), 64):
-        embs.append(sorter.embed_texts(prompts[i:i + 64]).cpu())
-        progress(f"Embedding {name} (one-time)", min(i + 64, len(prompts)), len(prompts))
-    embs = torch.cat(embs)
+    known = dict(zip(map(describe_fn, cache["tags"]), cache["embs"])) if cache else {}
+    missing = [p for p in prompts if p not in known]
+    for i in range(0, len(missing), 64):
+        known.update(zip(missing[i:i + 64], sorter.embed_texts(missing[i:i + 64]).cpu()))
+        progress(f"Embedding {len(missing)} new {name}", min(i + 64, len(missing)), len(missing))
+    embs = torch.stack([known[p] for p in prompts])
+    log(f"Danbooru {name}: {len(tags)} in pool ({len(missing)} new)")
     cache_file.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"model": model_id, "count": count, "tags": tags, "embs": embs}, cache_file)
+    torch.save({"model": model_id, "count": count, "time": time.time(), "tags": tags, "embs": embs}, cache_file)
     return tags, embs
 
 

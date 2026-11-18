@@ -54,6 +54,10 @@ Tried in order until one is confident:
 
 Series names come from Danbooru and are cached in `./models`.
 
+The name pool (step 4) is the top `--fallback-count` Danbooru characters with at least 20 posts. Danbooru only serves 1000 pages, so a huge count simply takes every such character (~68,000); the WD Tagger only knows ~2,750 characters up to early 2024, so newer ones (recent Star Rail / Genshin cast, newer Hololive members) are found through this pool and the Danbooru reference pictures. The pool is refreshed every 30 days and only new names are embedded. A bigger pool spreads the match score thinner, so keep `--fallback-threshold` lower when the pool is large.
+
+Anime-classified images that the tagger rates `realistic`/`photorealistic` (and that SigLIP gave some photo weight) are moved to `Real_Photograph`, which catches cosplay and filtered selfies. Tune with `--realistic-threshold` (default 0.5, -1 disables); the log line shows both scores.
+
 ## Train
 
 ```bash

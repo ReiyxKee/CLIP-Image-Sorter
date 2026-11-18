@@ -23,6 +23,9 @@ DANBOORU = "https://danbooru.donmai.us"
 DANBOORU_HEADERS = {"User-Agent": "clip-sorter/1.0"}
 QUALIFIER = re.compile(r"\(([^()]*)\)")
 FALLBACK_COUNT = 20000
+POOL_MIN_POSTS = 20
+POOL_MAX_AGE_DAYS = 30
+DANBOORU_MAX_PAGE = 1000
 SERIES_COUNT = 5000
 EXPAND_LIMIT = 100
 EXPAND_THRESHOLD = 0.9
@@ -42,6 +45,9 @@ REF_SHORTLIST = 5
 REF_IMAGES = 5
 COLORS = ("aqua", "black", "blonde", "blue", "brown", "green", "grey", "orange", "pink", "purple", "red", "silver", "white", "yellow")
 FALLBACK_THRESHOLD = 0.85
+REALISTIC_TAGS = ("realistic", "photorealistic")
+REALISTIC_THRESHOLD = 0.5
+REALISTIC_REAL_PROB = 0.15
 CATEGORY_PROMPTS = {
     REAL: [
         "a real photograph of a person taken with a camera",

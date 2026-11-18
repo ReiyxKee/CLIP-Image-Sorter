@@ -10,7 +10,7 @@ from pathlib import Path
 from timm.data import create_transform
 from timm.data import resolve_data_config
 
-from .config import APPEARANCE_THRESHOLD, COLORS, QUALIFIER, UNKNOWN_TITLE
+from .config import APPEARANCE_THRESHOLD, COLORS, QUALIFIER, REALISTIC_TAGS, UNKNOWN_TITLE
 from .danbooru import danbooru_related
 from .logs import log, progress
 from .names import base_name, legalize, title_name
@@ -32,6 +32,7 @@ class Tagger:
         self.aliases = load_aliases()
         self.explicit_idx = next(i for i, r in enumerate(rows) if r["category"] == "9" and r["name"] == "explicit")
         general = {r["name"]: i for i, r in enumerate(rows) if r["category"] == "0"}
+        self.realistic_idx = torch.tensor([general[t] for t in REALISTIC_TAGS if t in general], dtype=torch.long)
         self.looks = [[(f"{c}_{part}", general[f"{c}_{part}"]) for c in COLORS if f"{c}_{part}" in general] for part in ("hair", "eyes")]
 
     def series(self, char):
@@ -80,7 +81,7 @@ class Tagger:
 
     @torch.no_grad()
     def tag(self, paths, batch_size, threshold, r18_threshold):
-        labels, r18, appearance, multi = [], [], [], []
+        labels, r18, appearance, multi, realism = [], [], [], [], []
         for i in range(0, len(paths), batch_size):
             probs = self.probabilities(paths[i:i + batch_size])
             for row in probs[:, self.char_idx]:
@@ -96,8 +97,9 @@ class Tagger:
                 else:
                     labels.append((titles.pop(), None) if len(titles) == 1 else (None, None))
             r18 += (probs[:, self.explicit_idx] >= r18_threshold).tolist()
+            realism += probs[:, self.realistic_idx].amax(dim=-1).tolist() if len(self.realistic_idx) else [0.0] * len(probs)
             for row in probs:
                 best = [max(group, key=lambda t: row[t[1]]) for group in self.looks if group]
                 appearance.append([name for name, idx in best if row[idx] >= APPEARANCE_THRESHOLD])
             progress("Tagging anime characters", min(i + batch_size, len(paths)), len(paths))
-        return labels, r18, appearance, multi
+        return labels, r18, appearance, multi, realism

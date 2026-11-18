@@ -5,7 +5,7 @@ from collections import Counter
 from pathlib import Path
 from transformers import pipeline
 
-from clipsort.config import CATEGORY_PROMPTS, CHUNK_SIZE, EXPAND_THRESHOLD, FALLBACK_COUNT, FALLBACK_THRESHOLD, GALLERY_THRESHOLD, MODEL_ID, NSFW_ID, NSFW_THRESHOLD, R18, SERIES_COUNT, SESSION_FILE, TAGGER_ID, TRAINED_DIR, TRAINED_THRESHOLD
+from clipsort.config import CATEGORY_PROMPTS, CHUNK_SIZE, EXPAND_THRESHOLD, FALLBACK_COUNT, FALLBACK_THRESHOLD, GALLERY_THRESHOLD, MODEL_ID, NSFW_ID, NSFW_THRESHOLD, R18, REALISTIC_THRESHOLD, SERIES_COUNT, SESSION_FILE, TAGGER_ID, TRAINED_DIR, TRAINED_THRESHOLD
 from clipsort.files import collect_images, remove_empty_dirs
 from clipsort.gallery import Gallery, learn_from_folder
 from clipsort.hf_login import ensure_hf_login
@@ -36,6 +36,7 @@ def parse_args():
     p.add_argument("--category-threshold", type=float, default=0.45)
     p.add_argument("--character-threshold", type=float, default=0.9)
     p.add_argument("--nsfw-threshold", type=float, help="R18 cutoff 0-1, higher flags fewer images, -1 disables")
+    p.add_argument("--realistic-threshold", type=float, default=REALISTIC_THRESHOLD, help="Move anime-classified images the tagger rates this realistic to Real_Photograph, -1 disables")
     return p.parse_args()
 
 

@@ -1,5 +1,5 @@
 """Per-chunk sorting flow."""
-from .config import ANIME, CATEGORY_PROMPTS, R18, REAL, REF_SHORTLIST, SERIES_THRESHOLD, SUS_FILE, UNKNOWN_TITLE
+from .config import ANIME, CATEGORY_PROMPTS, R18, REAL, REALISTIC_REAL_PROB, REF_SHORTLIST, SERIES_THRESHOLD, SUS_FILE, UNKNOWN_TITLE
 from .files import original_stem, transfer_unique
 from .logs import log
 from .names import pretty
@@ -70,13 +70,24 @@ def process_chunk(paths, models, args, output, label, done_file):
     suspicious = {}
     anime = [i for i, c in enumerate(categories) if c == ANIME]
     if anime:
-        labels, flags, looks, multi = tagger.tag([paths[i] for i in anime], args.batch_size, args.character_threshold, args.nsfw_threshold)
+        labels, flags, looks, multi, realism = tagger.tag([paths[i] for i in anime], args.batch_size, args.character_threshold, args.nsfw_threshold)
         appearance = dict(zip(anime, looks))
+        photos = set()
+        for i, real_score in zip(anime, realism):
+            # SigLIP alone mixes up cosplay, beauty-filter selfies and edited photos with anime art.
+            # The tagger's "realistic" tag is a second opinion; requiring some SigLIP photo weight too
+            # keeps realistic paintings in anime.
+            photo = probs[i, real_i].item()
+            if args.realistic_threshold >= 0 and real_score >= args.realistic_threshold and photo >= REALISTIC_REAL_PROB:
+                categories[i], sources[i] = REAL, f"tagger realistic {real_score:.2f}, photo {photo:.2f}"
+                photos.add(i)
         for i, char, flag in zip(anime, labels, flags):
+            r18[i] = r18[i] or (flag and nsfw is not None)
+            if i in photos:
+                continue
             characters[i] = char
             sources[i] = "tagger" if char[1] else ""
-            r18[i] = r18[i] or (flag and nsfw is not None)
-        singles = [i for i, m in zip(anime, multi) if not m]
+        singles = [i for i, m in zip(anime, multi) if not m and i not in photos]
         confident = {}
         if trained and singles:
             for i, (char, c) in zip(singles, trained.predict([paths[i] for i in singles], args.batch_size)):

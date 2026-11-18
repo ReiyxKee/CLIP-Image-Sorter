@@ -6,7 +6,7 @@ from urllib.parse import urlencode
 from urllib.request import Request
 from urllib.request import urlopen
 
-from .config import DANBOORU, DANBOORU_HEADERS
+from .config import DANBOORU, DANBOORU_HEADERS, DANBOORU_MAX_PAGE
 from .logs import log, progress
 
 
@@ -16,13 +16,26 @@ def danbooru_related(query, category, limit):
         return [t["tag"]["name"] for t in json.load(r)["related_tags"]]
 
 
-def danbooru_top_tags(category, count, stage):
-    tags, pages = [], -(-count // 1000)
+def danbooru_top_tags(category, count, stage, min_posts=0):
+    """Most-used tags of a category. Danbooru refuses pages past 1000, and the list
+    ends long before that for characters, so stop at the first short page. A failed
+    page keeps what was already fetched instead of throwing it all away."""
+    tags, pages = [], min(-(-count // 1000), DANBOORU_MAX_PAGE)
     for page in range(1, pages + 1):
         progress(stage, page - 1, pages)
-        params = urlencode({"search[category]": category, "search[order]": "count", "limit": 1000, "page": page, "only": "name"})
-        with urlopen(Request(f"{DANBOORU}/tags.json?{params}", headers=DANBOORU_HEADERS), timeout=30) as r:
-            tags += [t["name"] for t in json.load(r)]
+        params = urlencode({"search[category]": category, "search[order]": "count", "search[post_count]": f">={min_posts}",
+                            "limit": 1000, "page": page, "only": "name"})
+        try:
+            with urlopen(Request(f"{DANBOORU}/tags.json?{params}", headers=DANBOORU_HEADERS), timeout=30) as r:
+                batch = [t["name"] for t in json.load(r)]
+        except Exception as e:
+            if not tags:
+                raise
+            log(f"Danbooru page {page} failed, keeping the {len(tags)} tags fetched so far: {e}")
+            break
+        tags += batch
+        if len(batch) < 1000:
+            break
     progress(stage, pages, pages)
     return tags[:count]
 
