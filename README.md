@@ -16,6 +16,17 @@ python -m venv .venv
 source .venv/bin/activate     # macOS / Linux
 ```
 
+## Settings
+
+The first run of either script creates `clip_config.ini` next to them, with every option and a comment for each. Edit it and just run the script; command-line flags override it for one run (`--help` lists them), and an empty value is asked at start (you are offered to save the answer). Delete the file to get the defaults back, or use another one with `--config my.ini`.
+
+- `[folders]`: names of the top-level output folders (anime, real, R18, non-human, uncategorizable)
+- `[files]`: `rename = on` renames sorted files to `<character>_<original name>`; `off` keeps their names
+- `[sorter]`: paths, mode, R18 on/off, thresholds, dedupe
+- `[trainer]`: trainer options; empty `target_path` / `model` follow `[sorter]`
+
+Paths are written as is, without quotes: `target_path = D:\Pictures\Images`.
+
 ## Sort
 
 ```bash
@@ -23,9 +34,9 @@ python clip_sorter.py
 python clip_sorter.py --target-path ./pics --output-path ./pics_sorted
 ```
 
-Anything not passed as a flag is asked at start. Modes: `copy` (default), `move`, `recategorize` (re-sort a sorted folder in place), `learn` (add a hand-fixed sorted folder to the reference gallery).
+Modes: `copy` (default), `move`, `recategorize` (re-sort a sorted folder in place), `learn` (add a hand-fixed sorted folder to the reference gallery). The main split is hand-drawn/anime versus real photos; the R18 split is optional (`r18 = off` or `--no-r18`).
 
-Output:
+Output (default names):
 
 ```
 pics_sorted/
@@ -33,8 +44,17 @@ pics_sorted/
 ├── Real_Photograph/
 ├── Anime_Handdrawn/<Series>/<Character>/
 ├── Non_Human/
-└── Uncategorizable/
+├── Uncategorizable/
+└── duplicates/          (only with dedupe on)
 ```
+
+### Renaming the folders
+
+Change the names in `[folders]` (e.g. `anime = Handdrawn`, `real = Real Photo`). Each sorted folder remembers the names it was sorted with (`.folder_names.json`); on the next sorter or trainer run the old folders are listed and, after you confirm, renamed, and the records that store sorted paths (`.sorted_index.jsonl`, `.multi_labels.json`, `models/suspicious.json`) are rewritten so the trainer does not mistake the rename for hand-moved images. It refuses when a target folder already exists or a correction session is unfinished.
+
+### Duplicates
+
+`dedupe = exact` sends copies with identical content to `duplicates_path` (empty = `<output>/duplicates`); `dedupe = similar` also catches the same picture resized or re-encoded (`similar_distance`, 0-64, default 4). New images are compared with everything already in the output folder and earlier in the run, and the first copy is kept. Duplicates are copied in `copy` mode (your input is untouched) and moved otherwise; `duplicates.txt` in that folder says what each one duplicates. Hashes of the output folder are cached in `.dedupe_index.json`, and the duplicates folder is skipped by `recategorize` and the trainer (it holds a `.clip_ignore` marker; any folder with one is skipped).
 
 Runs in chunks and resumes where it stopped (`.sorted_sources.txt` in the output folder).
 
@@ -105,11 +125,14 @@ Useful flags: `--skip-labeling`, `--epochs`, `--unfreeze 0` (classifier only, fa
 |---|---|
 | `setup.py` | Dependency check, CUDA torch, Hugging Face paths |
 | `hf_login.py` | Hugging Face CLI and login |
+| `settings.py` | `clip_config.ini`: defaults, reading, saving answers |
 | `config.py` | Constants and file paths |
 | `logs.py` | Console output and `Log/` files |
 | `names.py` | Name cleanup and prompt text |
 | `danbooru.py` | Danbooru API |
 | `files.py` | Image listing, moving, cleanup |
+| `layout.py` | Renaming output folders to match `[folders]` |
+| `dedupe.py` | Duplicate check (exact / similar) |
 | `records.py` | Index, suspicious list, aliases, series corrections |
 | `siglip.py` | SigLIP2 and main category |
 | `tagger.py` | WD Tagger |

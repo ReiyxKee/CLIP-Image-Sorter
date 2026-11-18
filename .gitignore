@@ -3,3 +3,4 @@ models/
 __pycache__/
 *_sorted/
 Log/
+clip_config.ini

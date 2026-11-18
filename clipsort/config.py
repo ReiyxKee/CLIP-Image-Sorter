@@ -3,6 +3,8 @@ import os
 import re
 from pathlib import Path
 
+from .settings import FOLDERS, RENAME_FILES
+
 
 MODEL_ID = "google/siglip2-so400m-patch14-384"
 EXTENSIONS = {
@@ -13,10 +15,16 @@ TAGGER_ID = "SmilingWolf/wd-eva02-large-tagger-v3"
 NSFW_ID = "Falconsai/nsfw_image_detection"
 CHUNK_SIZE = 500
 NSFW_THRESHOLD = 0.85
-R18 = "R18"
-REAL = "Real_Photograph"
-ANIME = "Anime_Handdrawn"
-UNCATEGORIZABLE = "Uncategorizable"
+# top-level output folders, named in clip_config.ini [folders]
+R18 = FOLDERS["r18"]
+REAL = FOLDERS["real"]
+ANIME = FOLDERS["anime"]
+NON_HUMAN = FOLDERS["non_human"]
+UNCATEGORIZABLE = FOLDERS["uncategorizable"]
+LAYOUT_FILE = ".folder_names.json"
+IGNORE_MARKER = ".clip_ignore"
+DEDUPE_INDEX = ".dedupe_index.json"
+DEDUPE_MODES = ("off", "exact", "similar")
 AMBIGUOUS = "Ambiguous"
 UNKNOWN_TITLE = "Unknown_Title"
 DANBOORU = "https://danbooru.donmai.us"
@@ -69,7 +77,7 @@ CATEGORY_PROMPTS = {
         "fan art of a fictional character",
         "a watercolor or pencil drawing of a person",
     ],
-    "Non_Human": [
+    NON_HUMAN: [
         "a photo of an animal",
         "a photo of a landscape with no people",
         "a photo of a building or city with no people",

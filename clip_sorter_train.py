@@ -3,42 +3,77 @@ import argparse
 import json
 from pathlib import Path
 
+from clipsort import settings
 from clipsort.config import MODEL_ID, SESSION_FILE
 from clipsort.corrections import apply_corrections, parse_corrections, run_corrections
 from clipsort.finetune import rollback, train
 from clipsort.gallery import Gallery
+from clipsort.layout import check_layout
 from clipsort.labeling import label_images, load_multi, suspicious_images, unlabeled_images
 from clipsort.linking import link_new_characters
 from clipsort.logs import log
 from clipsort.records import labeled_images
+from clipsort.settings import CONFIG_FILE
 from clipsort.siglip import pick_device
+
+TASKS = ("1", "2", "3", "4", "5")
+
+
+# option: (type, built-in default when clip_config.ini [trainer] leaves it empty)
+SETTINGS = {
+    "target_path": (Path, None),
+    "model": (str, None),
+    "epochs": (int, 5),
+    "batch_size": (int, 8),
+    "unfreeze": (int, 2),
+    "lr": (float, 1e-5),
+    "task": (str, None),
+    "no_ask": (bool, False),
+    "no_link": (bool, False),
+    "no_suggest": (bool, False),
+}
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Label unknown anime images and fine-tune a SigLIP2 copy as the last fallback.")
+    p = argparse.ArgumentParser(description=f"Label unknown anime images and fine-tune a SigLIP2 copy as the last fallback. Defaults come from {CONFIG_FILE.name}.")
+    p.add_argument("--config", help=f"Settings file to use instead of {CONFIG_FILE}")
     p.add_argument("--target-path", type=Path, help="Sorted output folder")
-    p.add_argument("--model", default=MODEL_ID, help="Base model when no trained copy exists yet")
-    p.add_argument("--epochs", type=int, default=5)
-    p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--unfreeze", type=int, default=2, help="Last vision layers to fine-tune, 0 = classifier only")
-    p.add_argument("--lr", type=float, default=1e-5)
-    p.add_argument("--task", choices=("1", "2", "3", "4", "5"), help="1 sort unclassed, 2 fix wrong category, 3 resolve suspicious, 4 train only, 5 roll back model")
+    p.add_argument("--model", help="Base model when no trained copy exists yet")
+    p.add_argument("--epochs", type=int)
+    p.add_argument("--batch-size", type=int)
+    p.add_argument("--unfreeze", type=int, help="Last vision layers to fine-tune, 0 = classifier only")
+    p.add_argument("--lr", type=float)
+    p.add_argument("--task", choices=TASKS, help="1 sort unclassed, 2 fix wrong category, 3 resolve suspicious, 4 train only, 5 roll back model")
     p.add_argument("--skip-labeling", action="store_true", help="Same as --task 4")
     p.add_argument("--fresh", action="store_true", help="Retrain from the original model instead of the last trained copy")
-    p.add_argument("--no-ask", action="store_true", help="Unattended: record unclear Danbooru matches as pending, auto-recover and auto-train")
+    p.add_argument("--no-ask", action="store_true", default=None, help="Unattended: record unclear Danbooru matches as pending, auto-recover and auto-train")
     p.add_argument("--resolve-untagged", action="store_true", help="Ask about characters and series left pending by --no-ask")
     p.add_argument("--relink", action="store_true", help="Ask again for pending ones and those marked as not on Danbooru")
-    p.add_argument("--no-link", action="store_true", help="Do not look up new characters on Danbooru")
-    p.add_argument("--no-suggest", action="store_true", help="Do not load models for label suggestions")
+    p.add_argument("--no-link", action="store_true", default=None, help="Do not look up new characters on Danbooru")
+    p.add_argument("--no-suggest", action="store_true", default=None, help="Do not load models for label suggestions")
     p.add_argument("--corrections", type=Path, help="Text file of wrongly sorted characters, see README")
-    return p.parse_args()
+    args = p.parse_args()
+    settings.apply(args, "trainer", SETTINGS)
+    if args.task is not None and args.task not in TASKS:
+        raise SystemExit(f"{CONFIG_FILE}: [trainer] task must be one of {', '.join(TASKS)} or empty")
+    # empty [trainer] values follow the sorter: same sorted folder, same base model
+    if args.target_path is None and settings.raw("sorter", "output_path"):
+        args.target_path = settings.convert("sorter", "output_path", Path, settings.raw("sorter", "output_path"))
+    if args.model is None:
+        args.model = settings.raw("sorter", "model") or MODEL_ID
+    return args
 
 
 def main():
     args = parse_args()
-    root = (args.target_path or Path(input("Sorted output folder: ").strip().strip("'\""))).expanduser().resolve()
+    root = args.target_path
+    if root is None:
+        root = Path(input("Sorted output folder: ").strip().strip("'\""))
+        settings.offer_save("trainer", {"target_path": root})
+    root = root.expanduser().resolve()
     if not root.is_dir():
         raise SystemExit(f"Folder not found: {root}")
+    check_layout(root, ask=not args.no_ask)
     task = "4" if args.skip_labeling else "2" if args.corrections else args.task
     resume = False
     if SESSION_FILE.exists():

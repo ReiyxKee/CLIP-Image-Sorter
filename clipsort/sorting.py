@@ -1,6 +1,6 @@
 """Per-chunk sorting flow."""
 from .config import ANIME, CATEGORY_PROMPTS, R18, REAL, REALISTIC_REAL_PROB, REF_SHORTLIST, SERIES_THRESHOLD, SUS_FILE, UNKNOWN_TITLE
-from .files import original_stem, transfer_unique
+from .files import sorted_stem, transfer_unique
 from .logs import log
 from .names import pretty
 from .nsfw import detect_nsfw
@@ -52,11 +52,21 @@ def resolve_unknown(unknown, embs, appearance, characters, sources, models, args
             characters[i], sources[i] = (series_titles[i], None), "series only"
 
 
-def process_chunk(paths, models, args, output, label, done_file):
+def mark_done(done_file, paths):
+    if done_file and paths:
+        with done_file.open("a", encoding="utf-8") as f:
+            f.writelines(f"{p}\n" for p in paths)
+
+
+def process_chunk(paths, models, args, output, label, done_file, deduper=None):
     sorter, class_embs, nsfw, tagger, fallback, expander, gallery, trained = models
-    paths, embs = sorter.embed_images(paths, args.batch_size)
+    dupes = []
+    if deduper:
+        paths, dupes = deduper.filter(paths)
+        mark_done(done_file, dupes)
+    paths, embs = sorter.embed_images(paths, args.batch_size) if paths else ([], None)
     if not paths:
-        return [], []
+        return ["duplicates"] * len(dupes), []
     categories, confs, probs = classify_categories(sorter, embs, class_embs, args.category_threshold)
 
     r18 = detect_nsfw(nsfw, paths, args.batch_size, args.nsfw_threshold) if nsfw else [False] * len(paths)
@@ -111,13 +121,11 @@ def process_chunk(paths, models, args, output, label, done_file):
     for n, (path, cat, conf, (title, char), flag, src) in enumerate(zip(paths, categories, confs, characters, r18, sources), 1):
         try:
             dest = ((output / R18 if flag else output) / cat).joinpath(*(pretty(x) for x in (title, char) if x))
-            original = original_stem(path) if args.mode == "recategorize" else path.stem
-            stem = f"{char}_{original[:10]}" if char else original
-            dest = transfer_unique(path, dest, args.mode, stem)
+            dest = transfer_unique(path, dest, args.mode, sorted_stem(path, char, args.mode == "recategorize"))
             append_index(output, dest, path, (title, char))
-            if done_file:
-                with done_file.open("a", encoding="utf-8") as f:
-                    f.write(f"{path}\n")
+            if deduper:
+                deduper.record(path, dest)
+            mark_done(done_file, [path])
             if n - 1 in suspicious:
                 sus_entries = [e for e in sus_entries if e["path"] != str(dest)] + [{"path": str(dest), **suspicious[n - 1]}]
             log(f"[{label} | {n}/{len(paths)}] {path.name} -> {dest.relative_to(output)} ({conf:.2f}{', ' + src if src else ''})")
@@ -126,4 +134,4 @@ def process_chunk(paths, models, args, output, label, done_file):
     if suspicious:
         save_sus(sus_entries)
         log(f"{len(suspicious)} suspicious images recorded in {SUS_FILE}")
-    return categories, r18
+    return categories + ["duplicates"] * len(dupes), r18

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from .config import ANIME, FALLBACK_COUNT, MULTI_FILE, QUALIFIER, SERIES_COUNT, TAGGER_ID, TRAINED_DIR
 from .corrections import reindex
-from .files import collect_images, original_stem, remove_empty_dirs, transfer_unique
+from .files import collect_images, remove_empty_dirs, sorted_stem, transfer_unique
 from .gallery import Gallery
 from .logs import log
 from .names import base_name, describe, describe_series, legalize, pretty, title_name
@@ -147,9 +147,9 @@ class Suggester:
 def target_for(path, anime_dir, labels):
     if len(labels) == 1:
         title, slug = labels[0]
-        return anime_dir / pretty(title) / pretty(slug), f"{slug}_{original_stem(path)[:10]}"
+        return anime_dir / pretty(title) / pretty(slug), sorted_stem(path, slug)
     titles = {t for t, _ in labels}
-    return (anime_dir / pretty(titles.pop()) if len(titles) == 1 else anime_dir), original_stem(path)
+    return (anime_dir / pretty(titles.pop()) if len(titles) == 1 else anime_dir), sorted_stem(path, None)
 
 
 def file_image(root, path, anime_dir, labels, multi):

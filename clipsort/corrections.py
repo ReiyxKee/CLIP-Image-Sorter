@@ -4,9 +4,9 @@ import re
 import torch
 from pathlib import PurePosixPath
 
-from .config import ANIME, CAST_LIMIT, DISCOVER_GALLERY, DISCOVER_TAGGER, LINKED_FILE, REF_IMAGES, RETRAIN_FILE, SESSION_FILE, TAGGER_ID
+from .config import ANIME, CAST_LIMIT, RENAME_FILES, DISCOVER_GALLERY, DISCOVER_TAGGER, LINKED_FILE, REF_IMAGES, RETRAIN_FILE, SESSION_FILE, TAGGER_ID
 from .danbooru import danbooru_find_tags, danbooru_reference_images, danbooru_related
-from .files import collect_images, original_stem, remove_empty_dirs, transfer_unique
+from .files import collect_images, remove_empty_dirs, sorted_stem, transfer_unique
 from .gallery import Gallery
 from .linking import PENDING, SKIP, ask_tag, link_new_characters, needs_link
 from .logs import log, progress
@@ -48,7 +48,7 @@ def apply_corrections(root, corrections, gallery):
             target = anime_dir / pretty(new[0]) / pretty(new[1])
             for p in images:
                 try:
-                    reindex(root, p, transfer_unique(p, target, "move", f"{new[1]}_{original_stem(p)[:10]}"))
+                    reindex(root, p, transfer_unique(p, target, "move", sorted_stem(p, new[1])))
                 except Exception as e:
                     log(f"Skip {p.name}: {e}")
             log(f"Moved {len(images)} images: {folder.relative_to(root)} -> {target.relative_to(root)}")
@@ -157,7 +157,7 @@ def apply_drift(root, model_id, session):
         old_label, new_label = (entry.get("title"), entry.get("char")), label_of_rel(new)
         path = root / new
         try:
-            if old_label[1] and new_label[1] and old_label[1] != new_label[1] and path.stem.startswith(f"{old_label[1]}_"):
+            if RENAME_FILES and old_label[1] and new_label[1] and old_label[1] != new_label[1] and path.stem.startswith(f"{old_label[1]}_"):
                 path = transfer_unique(path, path.parent, "move", f"{new_label[1]}_{path.stem[len(old_label[1]) + 1:]}")
                 new = path.relative_to(root).as_posix()
             _, embs = sorter.embed_images([path], 1)
@@ -282,7 +282,7 @@ def finalize(root, session):
             anime_dir = root.joinpath(*parts[:parts.index(ANIME) + 1])
             title, char = prop["label"]
             try:
-                dest = transfer_unique(path, anime_dir / pretty(title) / pretty(char), "move", f"{char}_{original_stem(path)[:10]}")
+                dest = transfer_unique(path, anime_dir / pretty(title) / pretty(char), "move", sorted_stem(path, char))
                 reindex(root, path, dest)
                 log(f"[{n}/{len(todo)}] {prop['path']} -> {dest.relative_to(root)} ({prop['source']} {prop['score']:.2f})")
             except Exception as e:
